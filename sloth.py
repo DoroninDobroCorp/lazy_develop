@@ -6,6 +6,7 @@ import subprocess
 import time
 import re
 import platform
+import sys
 
 # --- НАСТРОЙКИ ---
 API_KEY = 'REDACTED_GOOGLE_API_KEY'
@@ -25,7 +26,7 @@ try:
     print("ЛОГ: API сконфигурировано успешно.")
 except Exception as e:
     print(f"ЛОГ: ОШИБКА конфигурации API: {e}")
-    exit()
+    sys.exit(1)
 
 generation_config = { "temperature": 1, "top_p": 1, "top_k": 1, "max_output_tokens": 32768 }
 safety_settings = [
@@ -41,60 +42,39 @@ print(f"ЛОГ: Модель '{MODEL_NAME}' создана.")
 
 def get_command_rules():
     return f"""
-Ты — AI-ассистент, работающий в составе автоматизированной системы. Чтобы наше взаимодействие было успешным, пожалуйста, придерживайся следующих ключевых принципов:
+Ты — AI-ассистент в автоматизированной системе. Твоя задача — анализировать код и генерировать shell-команды для его изменения.
 
-1.  **Формат ответа — это критически важно.** Твой ответ должен строго соответствовать одной из двух структур:
-    *   **Если нужны действия:** Предоставь **только** блок команд, обернутый в ```bash ... ```. Пожалуйста, не добавляй никакого сопроводительного текста или комментариев вне этого блока.
-    *   **Если задача решена:** Предоставь **только** одно слово: `ГОТОВО`.
+**КЛЮЧЕВЫЕ ПРАВИЛА:**
 
-2.  **Сложные задачи.** Для задач, требующих сложной логики (например, запись большого файла с помощью `cat <<'EOF'`), используй `bash`. Скрипт-исполнитель корректно обработает многострочные команды внутри ```bash ... ``` блока.
+1.  **ФОРМАТ ОТВЕТА — ЭТО ЗАКОН:**
+    *   **Действия:** Если нужны правки, предоставь **только** блок команд, обернутый в ```bash ... ```. НЕ ДОБАВЛЯЙ НИКАКИХ комментариев или объяснений вне этого блока.
+    *   **Завершение:** Если задача полностью решена, напиши **только** одно слово: `ГОТОВО`.
 
-3.  **Разрешенные команды.** `{', '.join(ALLOWED_COMMANDS)}`. Если нужна другая команда, предложи ее в блоке `СОВЕТЫ:` после слова `ГОТОВО` в финальном ответе.
+2.  **ФОКУС НА ЗАДАЧЕ:** Концентрируйся строго на выполнении исходной задачи или исправлении последней ошибки. Не вноси изменения, не связанные с текущим запросом.
+
+3.  **РАБОТА С ФАЙЛАМИ:** Для перезаписи файла целиком используй `cat <<'EOF' > path/to/file.txt ... EOF`. Скрипт-исполнитель корректно обработает эту многострочную команду.
+
+4.  **РАЗРЕШЕННЫЕ КОМАНДЫ:** `{', '.join(ALLOWED_COMMANDS)}`. Если нужна другая команда, предложи ее в блоке `СОВЕТЫ:` после слова `ГОТОВО` в финальном ответе.
 """
 
 def get_initial_prompt(context, task):
-    return f"""{get_command_rules()}
---- КОНТЕКСТ ПРОЕКТА ---
-{context}
---- КОНЕЦ КОНТЕКСТА ---
-Задача: {task}
-Проанализируй задачу и предоставь ответ, строго следуя изложенным выше принципам.
-"""
+    return f"{get_command_rules()}\n--- КОНТЕКСТ ПРОЕКТА ---\n{context}\n--- КОНЕЦ КОНТЕКСТА ---\nЗадача: {task}\nПроанализируй задачу и предоставь ответ, строго следуя правилам."
 
 def get_review_prompt(context, task):
-    return f"""{get_command_rules()}
-Команды были выполнены. Вот обновленный проект:
---- КОНТЕКСТ ПРОЕКТА (ОБНОВЛЕННЫЙ) ---
-{context}
---- КОНЕЦ КОНТЕКСТА ---
-Первоначальная задача: {task}
-Задача решена? Если нет — дай новые команды. Если да — напиши "ГОТОВО".
-"""
+    # ВАЖНО: В этом промпте теперь всегда будет "чистая" задача без логов
+    return f"{get_command_rules()}\nКоманды были выполнены. Вот обновленный проект:\n--- КОНТЕКСТ ПРОЕКТА (ОБНОВЛЕННЫЙ) ---\n{context}\n--- КОНЕЦ КОНТЕКСТА ---\nНапоминаю исходную цель: {task}\nЗадача решена полностью? Если нет — дай новые команды. Если да — напиши \"ГОТОВО\"."
 
 def get_error_fixing_prompt(failed_command, error_message, task, context):
-    return f"""
-Ты — AI-ассистент для исправления ошибок. Твой ответ должен содержать **только** блок ```bash ... ``` с исправленной командой(ами). Пожалуйста, не пиши 'ГОТОВО' или объяснения.
-
---- ДАННЫЕ ОБ ОШИБКЕ ---
-КОМАНДА: {failed_command}
-СООБЩЕНИЕ: {error_message}
---- КОНЕЦ ДАННЫХ ОБ ОШИБКЕ ---
-Задача: {task}
-Проанализируй ошибку и предоставь исправленные команды.
---- КОНТЕКСТ, ГДЕ ПРОИЗОШЛА ОШИБКА ---
-{context}
---- КОНЕЦ КОНТЕКСТА ---"""
+    return f"""{get_command_rules()}\n**ВАЖНО:** Твоя задача — исправить конкретную ошибку. Не пиши 'ГОТОВО', а предоставь исправленный блок команд в формате ```bash ... ```.\n\n--- ДАННЫЕ ОБ ОШИБКЕ ---\nКОМАНДА: {failed_command}\nСООБЩЕНИЕ: {error_message}\n--- КОНЕЦ ДАННЫХ ОБ ОШИБКЕ ---\nИсходная цель была: {task}\nПроанализируй ошибку и предоставь исправленные команды.\n--- КОНТЕКСТ, ГДЕ ПРОИЗОШЛА ОШИБКА ---\n{context}\n--- КОНЕЦ КОНТЕКСТА ---"""
 
 
 # --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 
 def notify_user(message):
-    """Отправляет видное и/или слышимое уведомление пользователю. Более надежная версия."""
     print(f"ЛОГ: Отправляю уведомление: {message}")
     system = platform.system()
     try:
-        if system == "Darwin":  # macOS
-            # Атомарная команда, которая показывает уведомление и проигрывает стандартный звук
+        if system == "Darwin":
             script = f'display notification "{message}" with title "Sloth Script" sound name "Submarine"'
             subprocess.run(['osascript', '-e', script], check=True, timeout=10)
         elif system == "Linux":
@@ -103,14 +83,7 @@ def notify_user(message):
             command = f'powershell -Command "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.MessageBox]::Show(\'{message}\', \'Sloth Script\');"'
             subprocess.run(command, shell=True, check=True, timeout=30)
     except Exception as e:
-        print(f"ПРЕДУПРЕЖДЕНИЕ: Не удалось отправить основное уведомление. Ошибка: {e}. Пробую резервный звуковой метод.")
-        try: # Резервный звуковой метод
-             if system == "Darwin":
-                subprocess.run(['say', message], check=True, timeout=10)
-             elif system == "Linux":
-                subprocess.run(['spd-say', '-t', 'female1', message], check=True, timeout=10)
-        except Exception as e2:
-             print(f"ПРЕДУПРЕЖДЕНИЕ: Резервное звуковое уведомление тоже не сработало. Ошибка: {e2}")
+        print(f"ПРЕДУПРЕЖДЕНИЕ: Не удалось отправить визуальное уведомление. Ошибка: {e}.")
 
 def get_project_context():
     # ... (код функции без изменений)
@@ -119,11 +92,9 @@ def get_project_context():
         script_dir = os.path.dirname(os.path.abspath(__file__))
         script_to_run_path = os.path.join(script_dir, CONTEXT_SCRIPT)
         context_file_path = os.path.join(script_dir, CONTEXT_FILE)
-        if os.path.exists(context_file_path):
-            os.remove(context_file_path)
+        if os.path.exists(context_file_path): os.remove(context_file_path)
         subprocess.run(['python3', script_to_run_path], check=True, capture_output=True, text=True, encoding='utf-8')
-        with open(context_file_path, 'r', encoding='utf-8') as f:
-            context_data = f.read()
+        with open(context_file_path, 'r', encoding='utf-8') as f: context_data = f.read()
         print(f"ЛОГ: Контекст успешно обновлен. Размер: {len(context_data)} символов.")
         return context_data
     except Exception as e:
@@ -141,17 +112,12 @@ def apply_shell_commands(commands_str):
     print("ЛОГ: Вход в функцию apply_shell_commands().")
     try:
         is_macos = platform.system() == "Darwin"
-        if is_macos:
-            commands_str_adapted = re.sub(r"sed -i ", "sed -i '.bak' ", commands_str)
-        else:
-            commands_str_adapted = commands_str
+        commands_str_adapted = re.sub(r"sed -i ", "sed -i '.bak' ", commands_str) if is_macos else commands_str
         print(f"ЛОГ: Выполняю блок команд:\n---\n{commands_str_adapted}\n---")
         result = subprocess.run(['bash', '-c', commands_str_adapted], check=True, capture_output=True, text=True, encoding='utf-8')
         if result.stdout: print(f"STDOUT:\n{result.stdout.strip()}")
         if result.stderr: print(f"ПРЕДУПРЕЖДЕНИЕ (STDERR):\n{result.stderr.strip()}")
-        if is_macos:
-            print("ЛОГ: Очищаю временные .bak файлы на macOS...")
-            subprocess.run("find . -name '*.bak' -delete", shell=True)
+        if is_macos: subprocess.run("find . -name '*.bak' -delete", shell=True, check=True)
         print("ЛОГ: Блок команд успешно выполнен.")
         return True, None, None
     except subprocess.CalledProcessError as e:
@@ -162,6 +128,7 @@ def apply_shell_commands(commands_str):
         print(f"ЛОГ: Непредвиденная ОШИБКА в apply_shell_commands: {e}")
         return False, commands_str, str(e)
 
+
 def extract_filepath_from_command(command):
     # ... (код функции без изменений)
     parts = command.split()
@@ -169,8 +136,7 @@ def extract_filepath_from_command(command):
         if '/' in part or '.' in part:
             if part in ['-c', '-e', '<<']: continue
             clean_part = part.strip("'\"")
-            if os.path.exists(clean_part):
-                return clean_part
+            if os.path.exists(clean_part): return clean_part
     return None
 
 def send_request_to_model(prompt_text):
@@ -190,25 +156,42 @@ def send_request_to_model(prompt_text):
         print(f"ЛОГ: ОШИБКА при запросе к API: {e}")
         return None
 
+def get_multiline_input():
+    # ... (код функции без изменений)
+    print("Привет, друже! Опиши задачу (для завершения, нажми Enter три раза подряд):")
+    lines, empty_line_count = [], 0
+    while empty_line_count < 3:
+        try:
+            line = input()
+            if line:
+                lines.append(line)
+                empty_line_count = 0
+            else:
+                empty_line_count += 1
+                if empty_line_count < 3: lines.append("")
+        except EOFError: break
+    return '\n'.join(lines).rstrip('\n')
+
 # --- ГЛАВНЫЙ ЦИКЛ ---
 
 def main():
-    print("ЛОГ: Вход в функцию main().")
-    print("Привет, друже! Опиши задачу (для завершения ввода, нажми Enter на пустой строке):")
-    lines = []
-    while True:
-        line = input()
-        if line: lines.append(line)
-        else: break
-    initial_task = '\n'.join(lines)
-    if not initial_task:
-        raise ValueError("Задача не может быть пустой.")
+    full_user_input = get_multiline_input()
+    if not full_user_input: raise ValueError("Задача не может быть пустой.")
+
+    # КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: Разделяем задачу на "цель" и "лог ошибки"
+    # Эвристика: считаем, что все после "---" или типичных маркеров ошибки - это лог.
+    error_markers = [
+        "Pre-transform error:", "Internal server error:", "Plugin: vite:", "npm ERR!", "Traceback"
+    ]
+    task_parts = re.split(f"({'|'.join(re.escape(m) for m in error_markers)})", full_user_input, 1)
+    
+    user_goal = task_parts[0].strip()
+    current_task = full_user_input # Изначально работаем с полной задачей
 
     project_context = get_project_context()
-    if not project_context:
-        raise ConnectionError("Не удалось получить контекст проекта.")
+    if not project_context: raise ConnectionError("Не удалось получить контекст проекта.")
 
-    current_prompt = get_initial_prompt(project_context, initial_task)
+    current_prompt = get_initial_prompt(project_context, current_task)
 
     for iteration_count in range(1, MAX_ITERATIONS + 1):
         print(f"\n--- АВТОМАТИЧЕСКАЯ ИТЕРАЦИЯ {iteration_count}/{MAX_ITERATIONS} ---")
@@ -218,15 +201,12 @@ def main():
 
         print("\nПОЛУЧЕН ОТВЕТ МОДЕЛИ:\n" + "="*20 + f"\n{answer}\n" + "="*20)
 
-        if "ГОТОВО" in answer.upper():
+        if "ГОТОВО" in answer.upper() and len(answer.strip()) < 10:
             return "Задача выполнена успешно!"
 
         commands_to_run = extract_todo_block(answer)
         if not commands_to_run:
-            if "ГОТОВО" in answer.upper():
-                 return "Задача выполнена успешно!"
-            else:
-                return "Модель не предоставила блок команд и не считает задачу выполненной."
+            return "Модель не предоставила блок команд и не считает задачу выполненной."
 
         print("\nНайдены следующие shell-команды для автоматического применения:\n" + "-"*20 + f"\n{commands_to_run}\n" + "-"*20)
         
@@ -235,8 +215,10 @@ def main():
         if success:
             print("\nЛОГ: Команды успешно применены. Обновляю контекст для полной верификации.")
             project_context = get_project_context()
-            if not project_context: return "Не удалось обновить контекст после успешного применения команд."
-            current_prompt = get_review_prompt(project_context, initial_task)
+            if not project_context: return "Не удалось обновить контекст."
+            # Стираем память! Теперь работаем только с чистой целью.
+            current_task = user_goal 
+            current_prompt = get_review_prompt(project_context, current_task)
         else:
             print("\nЛОГ: Обнаружена ошибка. Запускаю цикл исправления.")
             filepath = extract_filepath_from_command(failed_command)
@@ -252,7 +234,7 @@ def main():
 
             current_prompt = get_error_fixing_prompt(
                 failed_command=failed_command, error_message=error_message,
-                task=initial_task, context=error_context)
+                task=user_goal, context=error_context) # Передаем чистую цель
             
             continue
             
@@ -262,6 +244,8 @@ if __name__ == "__main__":
     final_status = "Работа завершена."
     try:
         final_status = main()
+    except KeyboardInterrupt:
+        final_status = "Процесс прерван пользователем."
     except Exception as e:
         print(f"\nКРИТИЧЕСКАЯ НЕПЕРЕХВАЧЕННАЯ ОШИБКА: {e}")
         final_status = f"Скрипт аварийно завершился с ошибкой: {e}"
