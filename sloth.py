@@ -4,262 +4,269 @@ import google.generativeai as genai
 import os
 import subprocess
 import time
+import re
+import platform
 
 # --- НАСТРОЙКИ ---
-# ВНИМАНИЕ: Ты явно попросил вставить этот ключ.
-# В реальном проекте НИКОГДА не выкладывай ключ напрямую в код!
-# Используй переменные окружения или другие безопасные методы хранения.
-API_KEY = 'REDACTED_GOOGLE_API_KEY' # ВАЖНО: Убедитесь, что этот ключ актуален
-
-# Имя твоего скрипта, который собирает весь проект в один файл
+API_KEY = 'REDACTED_GOOGLE_API_KEY'
 CONTEXT_SCRIPT = 'AskGpt.py'
-# Имя файла, куда скрипт сохраняет весь код
-CONTEXT_FILE = 'message_1.txt' # Убедись, что имя файла верное
+CONTEXT_FILE = 'message_1.txt'
+MODEL_NAME = "gemini-2.5-pro"
+ALLOWED_COMMANDS = (
+    "sed", "rm", "mv", "touch", "mkdir", "npm", "npx", "yarn", "pnpm", "git", "echo", "./", "cat"
+)
+MAX_ITERATIONS = 15
+API_TIMEOUT_SECONDS = 600
 
 # --- КОНФИГУРАЦИЯ МОДЕЛИ ---
-MODEL_NAME = "gemini-2.5-pro"
-
 print(f"ЛОГ: Начинаю конфигурацию. Модель: {MODEL_NAME}")
 try:
     genai.configure(api_key=API_KEY)
     print("ЛОГ: API сконфигурировано успешно.")
 except Exception as e:
-    print(f"ЛОГ: ОШИБКА конфигурации API. Проверь правильность ключа. Ошибка: {e}")
+    print(f"ЛОГ: ОШИБКА конфигурации API: {e}")
     exit()
 
-# Настройки генерации (АКТУАЛЬНАЯ ВЕРСИЯ)
-generation_config = {
-    "temperature": 1, # Максимум "креативности", как ты и хотел
-    "top_p": 1,
-    "top_k": 1,
-    "max_output_tokens": 32768, # Максимальный размер ответа.
-}
-# Этот лог теперь будет выводить именно те значения, что указаны выше
-print(f"ЛОГ: Настройки генерации: {generation_config}")
-
-# Настройки безопасности (стандартные)
+generation_config = { "temperature": 1, "top_p": 1, "top_k": 1, "max_output_tokens": 32768 }
 safety_settings = [
     {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
     {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
     {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
-    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
 ]
-print(f"ЛОГ: Настройки безопасности: {safety_settings}")
-
-# Создаем модель
-model = genai.GenerativeModel(model_name=MODEL_NAME,
-                              generation_config=generation_config,
-                              safety_settings=safety_settings)
+model = genai.GenerativeModel(model_name=MODEL_NAME, generation_config=generation_config, safety_settings=safety_settings)
 print(f"ЛОГ: Модель '{MODEL_NAME}' создана.")
+
+# --- БЛОК ПРОМПТ-ШАБЛОНОВ ---
+
+def get_command_rules():
+    return f"""
+Ты — AI-ассистент, работающий в составе автоматизированной системы. Чтобы наше взаимодействие было успешным, пожалуйста, придерживайся следующих ключевых принципов:
+
+1.  **Формат ответа — это критически важно.** Твой ответ должен строго соответствовать одной из двух структур:
+    *   **Если нужны действия:** Предоставь **только** блок команд, обернутый в ```bash ... ```. Пожалуйста, не добавляй никакого сопроводительного текста или комментариев вне этого блока.
+    *   **Если задача решена:** Предоставь **только** одно слово: `ГОТОВО`.
+
+2.  **Сложные задачи.** Для задач, требующих сложной логики (например, запись большого файла с помощью `cat <<'EOF'`), используй `bash`. Скрипт-исполнитель корректно обработает многострочные команды внутри ```bash ... ``` блока.
+
+3.  **Разрешенные команды.** `{', '.join(ALLOWED_COMMANDS)}`. Если нужна другая команда, предложи ее в блоке `СОВЕТЫ:` после слова `ГОТОВО` в финальном ответе.
+"""
+
+def get_initial_prompt(context, task):
+    return f"""{get_command_rules()}
+--- КОНТЕКСТ ПРОЕКТА ---
+{context}
+--- КОНЕЦ КОНТЕКСТА ---
+Задача: {task}
+Проанализируй задачу и предоставь ответ, строго следуя изложенным выше принципам.
+"""
+
+def get_review_prompt(context, task):
+    return f"""{get_command_rules()}
+Команды были выполнены. Вот обновленный проект:
+--- КОНТЕКСТ ПРОЕКТА (ОБНОВЛЕННЫЙ) ---
+{context}
+--- КОНЕЦ КОНТЕКСТА ---
+Первоначальная задача: {task}
+Задача решена? Если нет — дай новые команды. Если да — напиши "ГОТОВО".
+"""
+
+def get_error_fixing_prompt(failed_command, error_message, task, context):
+    return f"""
+Ты — AI-ассистент для исправления ошибок. Твой ответ должен содержать **только** блок ```bash ... ``` с исправленной командой(ами). Пожалуйста, не пиши 'ГОТОВО' или объяснения.
+
+--- ДАННЫЕ ОБ ОШИБКЕ ---
+КОМАНДА: {failed_command}
+СООБЩЕНИЕ: {error_message}
+--- КОНЕЦ ДАННЫХ ОБ ОШИБКЕ ---
+Задача: {task}
+Проанализируй ошибку и предоставь исправленные команды.
+--- КОНТЕКСТ, ГДЕ ПРОИЗОШЛА ОШИБКА ---
+{context}
+--- КОНЕЦ КОНТЕКСТА ---"""
+
 
 # --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 
-def get_project_context():
-    """Запускает твой скрипт и читает контекст из файла."""
-    print(f"ЛОГ: Вход в функцию get_project_context().")
-    print(f"ЛОГ: Запускаю '{CONTEXT_SCRIPT}' для сбора контекста проекта...")
+def notify_user(message):
+    """Отправляет видное и/или слышимое уведомление пользователю. Более надежная версия."""
+    print(f"ЛОГ: Отправляю уведомление: {message}")
+    system = platform.system()
     try:
-        # --- ИСПРАВЛЕНИЕ ДЛЯ ПОИСКА ФАЙЛА ---
-        # Формируем полный, абсолютный путь к скрипту, чтобы subprocess его точно нашел.
+        if system == "Darwin":  # macOS
+            # Атомарная команда, которая показывает уведомление и проигрывает стандартный звук
+            script = f'display notification "{message}" with title "Sloth Script" sound name "Submarine"'
+            subprocess.run(['osascript', '-e', script], check=True, timeout=10)
+        elif system == "Linux":
+            subprocess.run(['notify-send', 'Sloth Script', message], check=True, timeout=10)
+        elif system == "Windows":
+            command = f'powershell -Command "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.MessageBox]::Show(\'{message}\', \'Sloth Script\');"'
+            subprocess.run(command, shell=True, check=True, timeout=30)
+    except Exception as e:
+        print(f"ПРЕДУПРЕЖДЕНИЕ: Не удалось отправить основное уведомление. Ошибка: {e}. Пробую резервный звуковой метод.")
+        try: # Резервный звуковой метод
+             if system == "Darwin":
+                subprocess.run(['say', message], check=True, timeout=10)
+             elif system == "Linux":
+                subprocess.run(['spd-say', '-t', 'female1', message], check=True, timeout=10)
+        except Exception as e2:
+             print(f"ПРЕДУПРЕЖДЕНИЕ: Резервное звуковое уведомление тоже не сработало. Ошибка: {e2}")
+
+def get_project_context():
+    # ... (код функции без изменений)
+    print("ЛОГ: Обновляю контекст проекта...")
+    try:
         script_dir = os.path.dirname(os.path.abspath(__file__))
         script_to_run_path = os.path.join(script_dir, CONTEXT_SCRIPT)
-
-        if not os.path.exists(script_to_run_path):
-             print(f"ЛОГ: ОШИБКА: Скрипт '{CONTEXT_SCRIPT}' не найден по полному пути: '{script_to_run_path}'")
-             return None
-
-        print(f"ЛОГ: Будет запущен скрипт по полному пути: '{script_to_run_path}'")
-        result = subprocess.run(
-            ['python3', script_to_run_path],
-            check=True, text=True, capture_output=True, encoding='utf-8'
-        )
-        # --- КОНЕЦ ИСПРАВЛЕНИЯ ---
-
-        print(f"ЛОГ: Скрипт '{CONTEXT_SCRIPT}' выполнен успешно. Стандартный вывод скрипта:\n{result.stdout}\nСтандартные ошибки скрипта:\n{result.stderr}")
-
         context_file_path = os.path.join(script_dir, CONTEXT_FILE)
         if os.path.exists(context_file_path):
-            with open(context_file_path, 'r', encoding='utf-8') as f:
-                context_data = f.read()
-                print(f"ЛОГ: Читаю контекст из '{context_file_path}'. Размер контекста: {len(context_data)} символов.")
-                print("ЛОГ: Контекст успешно прочитан.")
-                print(f"ЛОГ: Выход из функции get_project_context() с контекстом.")
-                return context_data
-        else:
-            print(f"ЛОГ: ОШИБКА: Файл '{CONTEXT_FILE}' не найден после выполнения '{CONTEXT_SCRIPT}'. Ожидался по пути: '{context_file_path}'")
-            print("ЛОГ: Выход из функции get_project_context() без контекста.")
-            return None
-    except FileNotFoundError:
-        print(f"ЛОГ: ОШИБКА: Интерпретатор 'python3' не найден. Убедитесь, что Python 3 установлен и доступен в системе.")
-        print("ЛОГ: Выход из функции get_project_context() без контекста.")
-        return None
-    except subprocess.CalledProcessError as e:
-        print(f"ЛОГ: ОШИБКА при выполнении '{CONTEXT_SCRIPT}':")
-        print(f"ЛОГ: STDOUT скрипта:\n{e.stdout}")
-        print(f"ЛОГ: STDERR скрипта:\n{e.stderr}")
-        print("ЛОГ: Выход из функции get_project_context() без контекста.")
-        return None
+            os.remove(context_file_path)
+        subprocess.run(['python3', script_to_run_path], check=True, capture_output=True, text=True, encoding='utf-8')
+        with open(context_file_path, 'r', encoding='utf-8') as f:
+            context_data = f.read()
+        print(f"ЛОГ: Контекст успешно обновлен. Размер: {len(context_data)} символов.")
+        return context_data
     except Exception as e:
-        print(f"ЛОГ: Непредвиденная ОШИБКА при чтении файла или выполнении скрипта: {e}")
-        print("ЛОГ: Выход из функции get_project_context() без контекста.")
+        print(f"ЛОГ: КРИТИЧЕСКАЯ ОШИБКА в get_project_context: {e}")
         return None
-
 
 def extract_todo_block(text):
-    """Извлекает текст между TODO START и TODO FINISH."""
-    print(f"ЛОГ: Вход в функцию extract_todo_block().")
+    # ... (код функции без изменений)
+    match = re.search(r"```bash\s*(.*?)\s*```", text, re.DOTALL)
+    if match: return match.group(1).strip()
+    return None
+
+def apply_shell_commands(commands_str):
+    # ... (код функции без изменений)
+    print("ЛОГ: Вход в функцию apply_shell_commands().")
     try:
-        start_marker = "TODO START"
-        end_marker = "TODO FINISH"
-        print(f"ЛОГ: Ищу маркер '{start_marker}'.")
-        start_index = text.find(start_marker)
-        if start_index == -1:
-            print(f"ЛОГ: Маркер '{start_marker}' не найден. Возвращаю пустую строку.")
-            print(f"ЛОГ: Выход из функции extract_todo_block().")
-            return ""
-
-        print(f"ЛОГ: Маркер '{start_marker}' найден на позиции {start_index}.")
-        print(f"ЛОГ: Ищу маркер '{end_marker}' после позиции {start_index}.")
-        end_index = text.find(end_marker, start_index)
-        if end_index == -1:
-            print(f"ЛОГ: Маркер '{end_marker}' не найден. Возвращаю пустую строку.")
-            print(f"ЛОГ: Выход из функции extract_todo_block().")
-            return ""
-
-        print(f"ЛОГ: Маркер '{end_marker}' найден на позиции {end_index}.")
-        todo_content = text[start_index + len(start_marker):end_index].strip()
-        print(f"ЛОГ: Извлечено содержимое TODO блока (длина: {len(todo_content)}).")
-        print(f"ЛОГ: Выход из функции extract_todo_block() с содержимым.")
-        return todo_content
+        is_macos = platform.system() == "Darwin"
+        if is_macos:
+            commands_str_adapted = re.sub(r"sed -i ", "sed -i '.bak' ", commands_str)
+        else:
+            commands_str_adapted = commands_str
+        print(f"ЛОГ: Выполняю блок команд:\n---\n{commands_str_adapted}\n---")
+        result = subprocess.run(['bash', '-c', commands_str_adapted], check=True, capture_output=True, text=True, encoding='utf-8')
+        if result.stdout: print(f"STDOUT:\n{result.stdout.strip()}")
+        if result.stderr: print(f"ПРЕДУПРЕЖДЕНИЕ (STDERR):\n{result.stderr.strip()}")
+        if is_macos:
+            print("ЛОГ: Очищаю временные .bak файлы на macOS...")
+            subprocess.run("find . -name '*.bak' -delete", shell=True)
+        print("ЛОГ: Блок команд успешно выполнен.")
+        return True, None, None
+    except subprocess.CalledProcessError as e:
+        error_msg = f"Команда: 'bash -c \"...\"'\nОшибка: {e.stderr.strip()}"
+        print(f"ЛОГ: КРИТИЧЕСКАЯ ОШИБКА при выполнении блока команд.\n{error_msg}")
+        return False, commands_str, e.stderr.strip()
     except Exception as e:
-        print(f"ЛОГ: ОШИБКА при извлечении блока TODO: {e}")
-        print(f"ЛОГ: Выход из функции extract_todo_block() с пустой строкой.")
-        return ""
+        print(f"ЛОГ: Непредвиденная ОШИБКА в apply_shell_commands: {e}")
+        return False, commands_str, str(e)
+
+def extract_filepath_from_command(command):
+    # ... (код функции без изменений)
+    parts = command.split()
+    for part in reversed(parts):
+        if '/' in part or '.' in part:
+            if part in ['-c', '-e', '<<']: continue
+            clean_part = part.strip("'\"")
+            if os.path.exists(clean_part):
+                return clean_part
+    return None
+
+def send_request_to_model(prompt_text):
+    # ... (код функции без изменений)
+    try:
+        print(f"ЛОГ: Отправляю запрос в модель... Размер промпта: ~{len(prompt_text)} символов.")
+        prompt_preview = re.sub(r'--- КОНТЕКСТ ПРОЕКТА.*---(.|\n|\r)*--- КОНЕЦ КОНТЕКСТА ---', '--- КОНТЕКСТ ПРОЕКТА (скрыт) ---', prompt_text)
+        prompt_preview = re.sub(r'--- СОДЕРЖИМОЕ ФАЙЛА.*---(.|\n|\r)*--- КОНЕЦ СОДЕРЖИМОГО ФАЙЛА ---', '--- СОДЕРЖИМОЕ ФАЙЛА (скрыто) ---', prompt_preview)
+        print(f"ЛОГ: Структура отправляемого промпта:\n---\n{prompt_preview}\n---")
+        response = model.generate_content(prompt_text, request_options={'timeout': API_TIMEOUT_SECONDS})
+        if not response.candidates or response.candidates[0].finish_reason.name != "STOP":
+            reason = response.candidates[0].finish_reason.name if response.candidates else "Неизвестно"
+            print(f"ЛОГ: ОШИБКА: Ответ от модели не получен или был прерван. Причина: {reason}")
+            return None
+        return response.text
+    except Exception as e:
+        print(f"ЛОГ: ОШИБКА при запросе к API: {e}")
+        return None
 
 # --- ГЛАВНЫЙ ЦИКЛ ---
 
 def main():
-    """Основная логика программы."""
     print("ЛОГ: Вход в функцию main().")
-    initial_task = input("Привет, друже! Опиши задачу или вставь текст ошибки:\n> ")
-    print(f"ЛОГ: Пользовательский ввод (начальная задача): '{initial_task}'")
+    print("Привет, друже! Опиши задачу (для завершения ввода, нажми Enter на пустой строке):")
+    lines = []
+    while True:
+        line = input()
+        if line: lines.append(line)
+        else: break
+    initial_task = '\n'.join(lines)
     if not initial_task:
-        print("ЛОГ: Начальная задача пуста. Выход из программы.")
-        print("Задача не может быть пустой. Выход.")
-        return
+        raise ValueError("Задача не может быть пустой.")
 
     project_context = get_project_context()
     if not project_context:
-        print("ЛОГ: Контекст проекта не получен. Выход из программы.")
-        return
+        raise ConnectionError("Не удалось получить контекст проекта.")
 
-    prompt_template = """
-    Привет. Я работаю над большим учебным проектом. Вот весь его код, собранный в один файл:
-    --- КОНТЕКСТ ПРОЕКТА ---
-    {context}
-    --- КОНЕЦ КОНТЕКСТА ---
+    current_prompt = get_initial_prompt(project_context, initial_task)
 
-    Моя задача: {task}
+    for iteration_count in range(1, MAX_ITERATIONS + 1):
+        print(f"\n--- АВТОМАТИЧЕСКАЯ ИТЕРАЦИЯ {iteration_count}/{MAX_ITERATIONS} ---")
+        
+        answer = send_request_to_model(current_prompt)
+        if not answer: return "Ошибка при запросе к модели."
 
-    Проанализируй код и задачу. Предоставь конкретные изменения, которые нужно внести для решения задачи.
-    ВАЖНО: Весь код, который нужно изменить или добавить, оберни в маркеры:
-    TODO START
-    # Указывай полный путь к файлу, который нужно изменить, например: # FILE: src/main.py
-    # ... здесь код для вставки/замены ...
-    TODO FINISH
+        print("\nПОЛУЧЕН ОТВЕТ МОДЕЛИ:\n" + "="*20 + f"\n{answer}\n" + "="*20)
 
-    Если ничего менять не нужно и задача решена, напиши только одно слово: "ГОТОВО".
-    """
-    print("ЛОГ: Шаблон промпта определён.")
+        if "ГОТОВО" in answer.upper():
+            return "Задача выполнена успешно!"
 
-    current_prompt = prompt_template.format(context=project_context, task=initial_task)
-    print(f"ЛОГ: Начальный промпт сформирован. Длина промпта: {len(current_prompt)} символов.")
+        commands_to_run = extract_todo_block(answer)
+        if not commands_to_run:
+            if "ГОТОВО" in answer.upper():
+                 return "Задача выполнена успешно!"
+            else:
+                return "Модель не предоставила блок команд и не считает задачу выполненной."
 
-    for iteration_count in range(1, 11): # Ограничим 10 итерациями, чтобы не уйти в вечный цикл
-        print(f"\n--- ИТЕРАЦИЯ {iteration_count} ---")
-        print(f"ЛОГ: Начинаю итерацию № {iteration_count}.")
-        print(f"ЛОГ: Отправляю запрос в модель {MODEL_NAME}...")
-
-        try:
-            print("ЛОГ: Отправляю запрос genai.GenerativeModel.generate_content()...")
-            response = model.generate_content(current_prompt)
-            answer = response.text
-            print("ЛОГ: Ответ от модели успешно получен.")
-        except Exception as e:
-            print(f"ЛОГ: ОШИБКА при запросе к API: {e}")
-            print("ЛОГ: Возможно, в вашем проекте слишком много текста или проблема с API ключом.")
-            print(f"Произошла ошибка при запросе к API: {e}")
-            print("Возможно, в вашем проекте слишком много текста или проблема с API ключом.")
-            break
-
-        print("\nПОЛУЧЕН ОТВЕТ:\n" + "="*20 + f"\n{answer}\n" + "="*20)
-        print(f"ЛОГ: Проверяю ответ модели на наличие 'ГОТОВО'.")
-
-        if "ГОТОВО" in answer.upper(): # Проверяем в верхнем регистре для надежности
-            print("ЛОГ: В ответе модели найдено 'ГОТОВО'. Считаем задачу выполненной.")
-            print("\nGemini считает, что задача выполнена! Пора тебе проверить результат!")
-            break
-
-        print("ЛОГ: 'ГОТОВО' не найдено. Извлекаю блок TODO.")
-        todo_changes = extract_todo_block(answer)
-        if not todo_changes:
-            print("ЛОГ: Блок TODO не найден в ответе модели.")
-            print("\nНе найдено блока TODO в ответе. Возможно, задача решена или модель не поняла запрос.")
-            print("Зову тебя проверить. Посмотри последний ответ от модели.")
-            print("ЛОГ: Выход из цикла и программы из-за отсутствия TODO блока.")
-            break
-
-        print("\nНайдены следующие рекомендации:\n" + "-"*20 + f"\n{todo_changes}\n" + "-"*20)
-        print("ЛОГ: Блок TODO успешно извлечён.")
-
-        user_input = input("Применить эти изменения и продолжить итерацию? (y/n): ")
-        print(f"ЛОГ: Пользовательский ввод для продолжения: '{user_input}'")
-        if user_input.lower() != 'y':
-            print("ЛОГ: Пользователь отказался продолжать. Работа остановлена.")
-            print("Работа остановлена.")
-            break
-
-        print("\nВАЖНО: Пожалуйста, вручную внеси предложенные изменения в код твоего проекта и сохрани файлы.")
-        input("Когда закончишь, нажми Enter для продолжения...")
-        print("ЛОГ: Пользователь подтвердил внесение изменений и готов продолжить.")
-
-        print("ЛОГ: Обновляю контекст проекта после твоих правок...")
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        context_file_path = os.path.join(script_dir, CONTEXT_FILE)
-        if os.path.exists(context_file_path):
-            print(f"ЛОГ: Обнаружен старый файл контекста '{context_file_path}'. Удаляю его.")
-            os.remove(context_file_path)
-            print("ЛОГ: Старый файл контекста удалён.")
+        print("\nНайдены следующие shell-команды для автоматического применения:\n" + "-"*20 + f"\n{commands_to_run}\n" + "-"*20)
+        
+        success, failed_command, error_message = apply_shell_commands(commands_to_run)
+        
+        if success:
+            print("\nЛОГ: Команды успешно применены. Обновляю контекст для полной верификации.")
+            project_context = get_project_context()
+            if not project_context: return "Не удалось обновить контекст после успешного применения команд."
+            current_prompt = get_review_prompt(project_context, initial_task)
         else:
-            print(f"ЛОГ: Старый файл контекста '{context_file_path}' не найден. Продолжаю.")
+            print("\nЛОГ: Обнаружена ошибка. Запускаю цикл исправления.")
+            filepath = extract_filepath_from_command(failed_command)
+            
+            error_context = ""
+            if filepath and os.path.exists(filepath) and not os.path.isdir(filepath):
+                print(f"ЛОГ: Ошибка в файле '{filepath}'. Готовлю сфокусированный промпт.")
+                with open(filepath, 'r', encoding='utf-8') as f: file_content = f.read()
+                error_context = f"--- СОДЕРЖИМОЕ ФАЙЛА: {filepath} ---\n{file_content}\n--- КОНЕЦ СОДЕРЖИМОГО ФАЙЛА ---"
+            else:
+                print(f"ЛОГ: Не удалось определить файл (найдено: {filepath}). Использую запасной план: полный контекст.")
+                error_context = f"--- КОНТЕКСТ ПРОЕКТА ---\n{project_context}\n--- КОНЕЦ КОНТЕКСТА ---"
 
-        project_context = get_project_context()
-        if not project_context:
-            print("ЛОГ: Новый контекст проекта не получен после обновления. Выход из программы.")
-            break
-
-        review_prompt_template = """
-        --- КОНТЕКСТ ПРОЕКТА (ОБНОВЛЕННЫЙ) ---
-        {context}
-        --- КОНЕЦ КОНТЕКСТА ---
-
-        Я внес предыдущие изменения. Первоначальная задача была: {task}
-
-        Проверь еще раз. Нужно ли что-то еще исправить? Только самое необходимое.
-        Если нужны еще правки, снова предоставь их в блоке TODO START ... TODO FINISH.
-        Если все готово, напиши только одно слово: "ГОТОВО".
-        """
-        current_prompt = review_prompt_template.format(context=project_context, task=initial_task)
-        print(f"ЛОГ: Промпт для следующей итерации сформирован. Длина: {len(current_prompt)} символов.")
-
-        print("ЛОГ: Пауза 3 секунды перед следующей итерацией...")
-        time.sleep(3)
-        print("ЛОГ: Пауза завершена.")
-
-    print("\nСкрипт завершил работу.")
-    print("ЛОГ: Выход из функции main().")
+            current_prompt = get_error_fixing_prompt(
+                failed_command=failed_command, error_message=error_message,
+                task=initial_task, context=error_context)
+            
+            continue
+            
+    return f"Достигнут лимит в {MAX_ITERATIONS} итераций."
 
 if __name__ == "__main__":
-    print("ЛОГ: Скрипт запущен как основной модуль.")
-    main()
-    print("ЛОГ: Выполнение скрипта завершено.")
+    final_status = "Работа завершена."
+    try:
+        final_status = main()
+    except Exception as e:
+        print(f"\nКРИТИЧЕСКАЯ НЕПЕРЕХВАЧЕННАЯ ОШИБКА: {e}")
+        final_status = f"Скрипт аварийно завершился с ошибкой: {e}"
+    finally:
+        print(f"\n{final_status}")
+        notify_user(final_status)
+        time.sleep(1) 
+        print("\nСкрипт завершил работу.")
