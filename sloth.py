@@ -4,8 +4,8 @@
 Скрипт интерактивно запрашивает у пользователя цель и опциональный лог ошибки,
 а затем итеративно взаимодействует с моделью Gemini для достижения цели.
 """
-
-import google.generativeai as genai
+import vertexai
+from vertexai.generative_models import GenerativeModel, HarmCategory, HarmBlockThreshold
 import os
 import subprocess
 import time
@@ -26,37 +26,39 @@ class Colors:
     UNDERLINE = '\033[4m'
 
 # --- НАСТРОЙКИ ---
-API_KEY = 'REDACTED_GOOGLE_API_KEY' 
+GOOGLE_CLOUD_PROJECT = "useful-gearbox-464618-v3"
+GOOGLE_CLOUD_LOCATION = "us-central1"
+MODEL_NAME = "gemini-2.5-pro" 
+
 CONTEXT_SCRIPT = 'AskGpt.py'
 CONTEXT_FILE = 'message_1.txt'
-MODEL_NAME = "gemini-1.5-pro"
 ALLOWED_COMMANDS = (
     "sed", "rm", "mv", "touch", "mkdir", "npm", "npx", "yarn", "pnpm", "git", "echo", "./", "cat"
 )
 MAX_ITERATIONS = 15
-API_TIMEOUT_SECONDS = 600
+API_TIMEOUT_SECONDS = 600 # Этот параметр больше не используется в вызове API, но оставлен для справки
 
 # --- КОНФИГУРАЦИЯ МОДЕЛИ ---
 print(f"{Colors.CYAN}⚙️  ЛОГ: Начинаю конфигурацию. Модель: {MODEL_NAME}{Colors.ENDC}")
 try:
-    if 'YOUR_API_KEY' in API_KEY:
-        raise ValueError("Необходимо указать API_KEY в скрипте sloth.py.")
-    genai.configure(api_key=API_KEY)
-    print(f"{Colors.OKGREEN}✅ ЛОГ: API сконфигурировано успешно.{Colors.ENDC}")
+    vertexai.init(project=GOOGLE_CLOUD_PROJECT, location=GOOGLE_CLOUD_LOCATION)
+    print(f"{Colors.OKGREEN}✅ ЛОГ: Vertex AI SDK успешно инициализирован для проекта '{GOOGLE_CLOUD_PROJECT}'.{Colors.ENDC}")
 except Exception as e:
-    print(f"{Colors.FAIL}❌ ЛОГ: ОШИБКА конфигурации API: {e}{Colors.ENDC}")
+    print(f"{Colors.FAIL}❌ ЛОГ: ОШИБКА инициализации Vertex AI SDK: {e}{Colors.ENDC}")
+    print(f"{Colors.WARNING}⚠️  ПОДСКАЗКА: Убедитесь, что вы аутентифицированы. Выполните в терминале: gcloud auth application-default login{Colors.ENDC}")
     sys.exit(1)
 
 generation_config = {
     "temperature": 1, "top_p": 1, "top_k": 1, "max_output_tokens": 32768
 }
-safety_settings = [
-    {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
-    {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
-    {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
-    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-]
-model = genai.GenerativeModel(
+safety_settings = {
+    HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+    HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+    HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+    HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+}
+
+model = GenerativeModel(
     model_name=MODEL_NAME,
     generation_config=generation_config,
     safety_settings=safety_settings
@@ -154,26 +156,21 @@ def notify_user(message):
     system = platform.system()
     try:
         if system == "Darwin":
-            # Всплывающее окно на macOS
-            script = f'''
-            tell application "System Events"
-                display dialog "{message}" with icon stop buttons {{"OK"}} default button "OK" giving up after 10
-            end tell
-            '''
-            subprocess.run(['osascript', '-e', script], check=True, timeout=10)
-            # Звук через afplay (предположим, что у вас есть системный звук)
-            subprocess.run(['afplay', '/System/Library/Sounds/Glass.aiff'], check=True, timeout=5)
+            ### ИЗМЕНЕНИЕ 2: Замена звука на более длинный и заметный ###
+            # Звук через afplay (самый надежный способ на macOS)
+            subprocess.run(['afplay', '/System/Library/Sounds/Sosumi.aiff'], check=True, timeout=5)
+            ### КОНЕЦ ИЗМЕНЕНИЯ 2 ###
         elif system == "Linux":
             # Всплывающее окно на Ubuntu
             subprocess.run(['zenity', '--info', '--text', message, '--title', 'Sloth Script', '--timeout=10', '--window-icon=info'], check=True, timeout=10)
             # Звук через aplay (или другой аудиопроигрыватель)
-            subprocess.run(['aplay', '/usr/share/sounds/alsa/Front_Center.wav'], check=True)  # Замените на ваш звук
+            subprocess.run(['aplay', '/usr/share/sounds/alsa/Front_Center.wav'], check=True)
         elif system == "Windows":
             # Всплывающее окно на Windows
             command = f'powershell -Command "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.MessageBox]::Show(\'{message}\', \'Sloth Script\');"'
             subprocess.run(command, shell=True, check=True, timeout=30)
     except Exception as e:
-        print(f"{Colors.WARNING}⚠️  ПРЕДУПРЕЖДЕНИЕ: Не удалось отправить визуальное уведомление. Ошибка: {e}.{Colors.ENDC}")
+        print(f"{Colors.WARNING}⚠️  ПРЕДУПРЕЖДЕНИЕ: Не удалось отправить системное уведомление. Ошибка: {e}.{Colors.ENDC}")
 
 def get_project_context():
     print(f"{Colors.CYAN}🔄 ЛОГ: Обновляю контекст проекта...{Colors.ENDC}")
@@ -247,7 +244,12 @@ def send_request_to_model(prompt_text):
         prompt_preview = re.sub(r'--- КОНТЕКСТ ПРОЕКТА.*---(.|\n|\r)*--- КОНЕЦ КОНТЕКСТА ---', '--- КОНТЕКСТ ПРОЕКТА (скрыт) ---', prompt_text, flags=re.DOTALL)
         prompt_preview = re.sub(r'--- СОДЕРЖИМОЕ ФАЙЛА.*---(.|\n|\r)*--- КОНЕЦ СОДЕРЖИМОГО ФАЙЛА ---', '--- СОДЕРЖИМОЕ ФАЙЛА (скрыто) ---', prompt_preview, flags=re.DOTALL)
         print(f"{Colors.OKBLUE}  [Детали] Структура отправляемого промпта:\n---\n{prompt_preview}\n---{Colors.ENDC}")
-        response = model.generate_content(prompt_text, request_options={'timeout': API_TIMEOUT_SECONDS})
+        
+        ### ИЗМЕНЕНИЕ 1: Удаление request_options из вызова ###
+        # API Vertex AI не принимает этот аргумент в `generate_content`.
+        response = model.generate_content(prompt_text)
+        ### КОНЕЦ ИЗМЕНЕНИЯ 1 ###
+
         if not response.candidates or response.candidates[0].finish_reason.name != "STOP":
             reason = response.candidates[0].finish_reason.name if response.candidates else "Неизвестно"
             print(f"{Colors.FAIL}❌ ЛОГ: ОШИБКА: Ответ от модели не получен или был прерван. Причина: {reason}{Colors.ENDC}")
@@ -313,7 +315,6 @@ def main():
 
         print(f"\n{Colors.OKGREEN}📦 ПОЛУЧЕН ОТВЕТ МОДЕЛИ:{Colors.ENDC}\n" + "="*20 + f"\n{answer}\n" + "="*20)
 
-        # ИЗМЕНЕНИЕ: Проверяем, начинается ли ответ с "ГОТОВО"
         if answer.strip().upper().startswith("ГОТОВО"):
             manual_steps = extract_manual_steps_block(answer)
             final_message = f"{Colors.OKGREEN}✅ Задача выполнена успешно!{Colors.ENDC}"
