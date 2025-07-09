@@ -67,11 +67,27 @@ def get_command_rules():
 
 2.  **ФОРМАТ ОТВЕТА — ЭТО ЗАКОН:**
     *   **Действия:** Если нужны правки, предоставь **только** блок команд, обернутый в ```bash ... ```. Никаких комментариев вне блока.
-    *   **Завершение:** Если задача полностью решена, напиши **только** одно слово: `ГОТОВО`.
+    *   **Завершение:**
+        *   Если задача полностью решена и **не требует ручных действий от человека**, напиши **только** одно слово: `ГОТОВО`.
+        *   Если после твоих правок **человеку нужно выполнить команды** (например, `npx`, `prisma`), сначала напиши `ГОТОВО`, а затем добавь блок ```manual ... ``` с инструкциями.
+
+    **Пример ответа с ручными шагами:**
+    ```
+    ГОТОВО
+
+    ```manual
+    # Я внес все необходимые правки в код.
+    # Теперь, пожалуйста, выполни эти команды, чтобы завершить настройку:
+    npx prisma generate
+    npx prisma db push
+    ```
+    ```
 
 3.  **ФОКУС НА ЗАДАЧЕ:** Концентрируйся строго на выполнении исходной **цели**. Не предлагай исправления для проблем, которые уже решены в предыдущих итерациях. Каждый раз анализируй код заново.
 
-4.  **РАЗРЕШЕННЫЕ КОМАНДЫ:** `{', '.join(ALLOWED_COMMANDS)}`.
+4.  **РАЗРЕШЕННЫЕ КОМАНДЫ:** `{', '.join(ALLOWED_COMMANDS)}`. Команды, не входящие в этот список, должны быть помещены в блок ```manual```.
+
+5.  **СОХРАНЯЙ КОНТЕКСТ:** **Критически важно!** Не вноси изменения в код, не относящиеся напрямую к поставленной задаче. Не исправляй стиль, не делай рефакторинг и не меняй настройки, если это не является причиной исходной ошибки или частью цели. Безопасность и лучшие практики — ответственность пользователя, если они не мешают выполнению задачи.
 """
 
 def get_initial_prompt(context, task):
@@ -88,7 +104,7 @@ def get_review_prompt(context, goal):
 **Твоя задача — ВЕРИФИКАЦИЯ:**
 1.  Забудь про старые логи. Проанализируй **текущий** код.
 2.  Сравни его с **изначальной целью**.
-3.  Если цель достигнута, напиши "ГОТОВО".
+3.  Если цель достигнута, используй формат `ГОТОВО` (с опциональным блоком `manual`).
 4.  Если нет, предоставь следующий блок команд для исправления.
 
 --- КОНТЕКСТ ПРОЕКТА (ОБНОВЛЕННЫЙ) ---
@@ -125,11 +141,22 @@ def notify_user(message):
     system = platform.system()
     try:
         if system == "Darwin":
-            script = f'display notification "{message}" with title "Sloth Script" sound name "Submarine"'
+            # Всплывающее окно на macOS
+            script = f'''
+            tell application "System Events"
+                display dialog "{message}" with icon stop buttons {"OK"} default button "OK" giving up after 10
+            end tell
+            '''
             subprocess.run(['osascript', '-e', script], check=True, timeout=10)
+            # Звук через afplay (предположим, что у вас есть системный звук)
+            subprocess.run(['afplay', '/System/Library/Sounds/Glass.aiff'], check=True, timeout=5)
         elif system == "Linux":
-            subprocess.run(['notify-send', 'Sloth Script', message], check=True, timeout=10)
+            # Всплывающее окно на Ubuntu
+            subprocess.run(['zenity', '--info', '--text', message, '--title', 'Sloth Script', '--timeout=10', '--window-icon=info'], check=True, timeout=10)
+            # Звук через aplay (или другой аудиопроигрыватель)
+            subprocess.run(['aplay', '/usr/share/sounds/alsa/Front_Center.wav'], check=True)  # Замените на ваш звук
         elif system == "Windows":
+            # Всплывающее окно на Windows
             command = f'powershell -Command "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.MessageBox]::Show(\'{message}\', \'Sloth Script\');"'
             subprocess.run(command, shell=True, check=True, timeout=30)
     except Exception as e:
@@ -158,6 +185,13 @@ def get_project_context():
 def extract_todo_block(text):
     match = re.search(r"```bash\s*(.*?)\s*```", text, re.DOTALL)
     if match: return match.group(1).strip()
+    return None
+
+def extract_manual_steps_block(text):
+    """Извлекает опциональный блок с инструкциями для ручного выполнения."""
+    match = re.search(r"```manual\s*(.*?)\s*```", text, re.DOTALL)
+    if match:
+        return match.group(1).strip()
     return None
 
 def apply_shell_commands(commands_str):
@@ -266,8 +300,15 @@ def main():
 
         print("\nПОЛУЧЕН ОТВЕТ МОДЕЛИ:\n" + "="*20 + f"\n{answer}\n" + "="*20)
 
-        if "ГОТОВО" in answer.upper() and len(answer.strip()) < 10:
-            return "Задача выполнена успешно!"
+        # ИЗМЕНЕНИЕ: Проверяем, начинается ли ответ с "ГОТОВО"
+        if answer.strip().upper().startswith("ГОТОВО"):
+            manual_steps = extract_manual_steps_block(answer)
+            final_message = "Задача выполнена успешно!"
+            
+            if manual_steps:
+                final_message += "\n\nВАЖНО: Требуются следующие ручные действия:\n" + "-"*20 + f"\n{manual_steps}\n" + "-"*20
+                
+            return final_message
 
         commands_to_run = extract_todo_block(answer)
         if not commands_to_run:
