@@ -1,4 +1,9 @@
 # -*- coding: utf-8 -*-
+"""
+Автоматизированный AI-ассистент для написания и исправления кода.
+Скрипт интерактивно запрашивает у пользователя цель и опциональный лог ошибки,
+а затем итеративно взаимодействует с моделью Gemini для достижения цели.
+"""
 
 import google.generativeai as genai
 import os
@@ -9,7 +14,7 @@ import platform
 import sys
 
 # --- НАСТРОЙКИ ---
-API_KEY = 'AIzaSyBlW_LcWYEYivEhPo7Q7Lc_vmNu-wtI-wM'
+API_KEY = 'AIzaSyBlW_LcWYEYivEhPo7Q7Lc_vmNu-wtI-wM' 
 CONTEXT_SCRIPT = 'AskGpt.py'
 CONTEXT_FILE = 'message_1.txt'
 MODEL_NAME = "gemini-2.5-pro"
@@ -22,50 +27,95 @@ API_TIMEOUT_SECONDS = 600
 # --- КОНФИГУРАЦИЯ МОДЕЛИ ---
 print(f"ЛОГ: Начинаю конфигурацию. Модель: {MODEL_NAME}")
 try:
+    if 'YOUR_API_KEY' in API_KEY:
+        raise ValueError("Необходимо указать API_KEY в скрипте sloth.py.")
     genai.configure(api_key=API_KEY)
     print("ЛОГ: API сконфигурировано успешно.")
 except Exception as e:
     print(f"ЛОГ: ОШИБКА конфигурации API: {e}")
     sys.exit(1)
 
-generation_config = { "temperature": 1, "top_p": 1, "top_k": 1, "max_output_tokens": 32768 }
+generation_config = {
+    "temperature": 1, "top_p": 1, "top_k": 1, "max_output_tokens": 32768
+}
 safety_settings = [
     {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
     {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
     {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
     {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
 ]
-model = genai.GenerativeModel(model_name=MODEL_NAME, generation_config=generation_config, safety_settings=safety_settings)
+model = genai.GenerativeModel(
+    model_name=MODEL_NAME,
+    generation_config=generation_config,
+    safety_settings=safety_settings
+)
 print(f"ЛОГ: Модель '{MODEL_NAME}' создана.")
+
 
 # --- БЛОК ПРОМПТ-ШАБЛОНОВ ---
 
 def get_command_rules():
+    """Возвращает базовый набор правил для модели."""
     return f"""
 Ты — AI-ассистент в автоматизированной системе. Твоя задача — анализировать код и генерировать shell-команды для его изменения.
 
 **КЛЮЧЕВЫЕ ПРАВИЛА:**
 
-1.  **ФОРМАТ ОТВЕТА — ЭТО ЗАКОН:**
-    *   **Действия:** Если нужны правки, предоставь **только** блок команд, обернутый в ```bash ... ```. НЕ ДОБАВЛЯЙ НИКАКИХ комментариев или объяснений вне этого блока.
+1.  **СТРАТЕГИЯ ИЗМЕНЕНИЙ:**
+    *   **Точечные правки предпочтительнее:** Для больших файлов старайся использовать `sed` для точечных замен, вставок или удалений строк. Это безопаснее.
+    *   **Полная перезапись:** Если точечная правка невозможна или слишком сложна, можно использовать `cat <<'EOF' > path/to/file.txt ... EOF` для полной перезаписи. **В этом случае будь предельно аккуратен, чтобы не удалить случайно другие части файла и сохранить исходное форматирование.**
+
+2.  **ФОРМАТ ОТВЕТА — ЭТО ЗАКОН:**
+    *   **Действия:** Если нужны правки, предоставь **только** блок команд, обернутый в ```bash ... ```. Никаких комментариев вне блока.
     *   **Завершение:** Если задача полностью решена, напиши **только** одно слово: `ГОТОВО`.
 
-2.  **ФОКУС НА ЗАДАЧЕ:** Концентрируйся строго на выполнении исходной задачи или исправлении последней ошибки. Не вноси изменения, не связанные с текущим запросом.
+3.  **ФОКУС НА ЗАДАЧЕ:** Концентрируйся строго на выполнении исходной **цели**. Не предлагай исправления для проблем, которые уже решены в предыдущих итерациях. Каждый раз анализируй код заново.
 
-3.  **РАБОТА С ФАЙЛАМИ:** Для перезаписи файла целиком используй `cat <<'EOF' > path/to/file.txt ... EOF`. Скрипт-исполнитель корректно обработает эту многострочную команду.
-
-4.  **РАЗРЕШЕННЫЕ КОМАНДЫ:** `{', '.join(ALLOWED_COMMANDS)}`. Если нужна другая команда, предложи ее в блоке `СОВЕТЫ:` после слова `ГОТОВО` в финальном ответе.
+4.  **РАЗРЕШЕННЫЕ КОМАНДЫ:** `{', '.join(ALLOWED_COMMANDS)}`.
 """
 
 def get_initial_prompt(context, task):
+    """Создает первоначальный промпт для старта работы (с возможным логом ошибки)."""
     return f"{get_command_rules()}\n--- КОНТЕКСТ ПРОЕКТА ---\n{context}\n--- КОНЕЦ КОНТЕКСТА ---\nЗадача: {task}\nПроанализируй задачу и предоставь ответ, строго следуя правилам."
 
-def get_review_prompt(context, task):
-    # ВАЖНО: В этом промпте теперь всегда будет "чистая" задача без логов
-    return f"{get_command_rules()}\nКоманды были выполнены. Вот обновленный проект:\n--- КОНТЕКСТ ПРОЕКТА (ОБНОВЛЕННЫЙ) ---\n{context}\n--- КОНЕЦ КОНТЕКСТА ---\nНапоминаю исходную цель: {task}\nЗадача решена полностью? Если нет — дай новые команды. Если да — напиши \"ГОТОВО\"."
+def get_review_prompt(context, goal):
+    """
+    Создает промпт для верификации. **ВАЖНО: использует только чистую цель, без логов.**
+    """
+    return f"""{get_command_rules()}
+**ВАЖНО:** Предыдущий шаг выполнен. Код ниже — это **обновленное состояние** проекта. Лог ошибки, который, возможно, был в начале, **БОЛЬШЕ НЕ АКТУАЛЕН**.
 
-def get_error_fixing_prompt(failed_command, error_message, task, context):
-    return f"""{get_command_rules()}\n**ВАЖНО:** Твоя задача — исправить конкретную ошибку. Не пиши 'ГОТОВО', а предоставь исправленный блок команд в формате ```bash ... ```.\n\n--- ДАННЫЕ ОБ ОШИБКЕ ---\nКОМАНДА: {failed_command}\nСООБЩЕНИЕ: {error_message}\n--- КОНЕЦ ДАННЫХ ОБ ОШИБКЕ ---\nИсходная цель была: {task}\nПроанализируй ошибку и предоставь исправленные команды.\n--- КОНТЕКСТ, ГДЕ ПРОИЗОШЛА ОШИБКА ---\n{context}\n--- КОНЕЦ КОНТЕКСТА ---"""
+**Твоя задача — ВЕРИФИКАЦИЯ:**
+1.  Забудь про старые логи. Проанализируй **текущий** код.
+2.  Сравни его с **изначальной целью**.
+3.  Если цель достигнута, напиши "ГОТОВО".
+4.  Если нет, предоставь следующий блок команд для исправления.
+
+--- КОНТЕКСТ ПРОЕКТА (ОБНОВЛЕННЫЙ) ---
+{context}
+--- КОНЕЦ КОНТЕКСТА ---
+
+Напоминаю ИСХОДНУЮ ЦЕЛЬ: {goal}
+"""
+
+def get_error_fixing_prompt(failed_command, error_message, goal, context):
+    """Создает промпт для исправления ошибки выполнения команды."""
+    return f"""{get_command_rules()}
+**ВАЖНО:** Твоя задача — исправить ошибку выполнения команды. Не пиши 'ГОТОВО'.
+
+--- ДАННЫЕ ОБ ОШИБКЕ ---
+КОМАНДА: {failed_command}
+СООБЩЕНИЕ: {error_message}
+--- КОНЕЦ ДАННЫХ ОБ ОШИБКЕ ---
+
+Исходная ЦЕЛЬ была: {goal}
+
+Проанализируй ошибку и предоставь **исправленный блок команд**.
+
+--- КОНТЕКСТ, ГДЕ ПРОИЗОШЛА ОШИБКА ---
+{context}
+--- КОНЕЦ КОНТЕКСТА ---
+"""
 
 
 # --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
@@ -86,15 +136,19 @@ def notify_user(message):
         print(f"ПРЕДУПРЕЖДЕНИЕ: Не удалось отправить визуальное уведомление. Ошибка: {e}.")
 
 def get_project_context():
-    # ... (код функции без изменений)
     print("ЛОГ: Обновляю контекст проекта...")
     try:
         script_dir = os.path.dirname(os.path.abspath(__file__))
         script_to_run_path = os.path.join(script_dir, CONTEXT_SCRIPT)
         context_file_path = os.path.join(script_dir, CONTEXT_FILE)
+
         if os.path.exists(context_file_path): os.remove(context_file_path)
+
         subprocess.run(['python3', script_to_run_path], check=True, capture_output=True, text=True, encoding='utf-8')
-        with open(context_file_path, 'r', encoding='utf-8') as f: context_data = f.read()
+        
+        with open(context_file_path, 'r', encoding='utf-8') as f:
+            context_data = f.read()
+
         print(f"ЛОГ: Контекст успешно обновлен. Размер: {len(context_data)} символов.")
         return context_data
     except Exception as e:
@@ -102,22 +156,24 @@ def get_project_context():
         return None
 
 def extract_todo_block(text):
-    # ... (код функции без изменений)
     match = re.search(r"```bash\s*(.*?)\s*```", text, re.DOTALL)
     if match: return match.group(1).strip()
     return None
 
 def apply_shell_commands(commands_str):
-    # ... (код функции без изменений)
     print("ЛОГ: Вход в функцию apply_shell_commands().")
     try:
         is_macos = platform.system() == "Darwin"
         commands_str_adapted = re.sub(r"sed -i ", "sed -i '.bak' ", commands_str) if is_macos else commands_str
+            
         print(f"ЛОГ: Выполняю блок команд:\n---\n{commands_str_adapted}\n---")
         result = subprocess.run(['bash', '-c', commands_str_adapted], check=True, capture_output=True, text=True, encoding='utf-8')
+
         if result.stdout: print(f"STDOUT:\n{result.stdout.strip()}")
         if result.stderr: print(f"ПРЕДУПРЕЖДЕНИЕ (STDERR):\n{result.stderr.strip()}")
+        
         if is_macos: subprocess.run("find . -name '*.bak' -delete", shell=True, check=True)
+
         print("ЛОГ: Блок команд успешно выполнен.")
         return True, None, None
     except subprocess.CalledProcessError as e:
@@ -130,17 +186,15 @@ def apply_shell_commands(commands_str):
 
 
 def extract_filepath_from_command(command):
-    # ... (код функции без изменений)
     parts = command.split()
     for part in reversed(parts):
-        if '/' in part or '.' in part:
-            if part in ['-c', '-e', '<<']: continue
-            clean_part = part.strip("'\"")
-            if os.path.exists(clean_part): return clean_part
+        if part in ['-c', '-e', '<<']: continue
+        clean_part = part.strip("'\"")
+        if ('/' in clean_part or '.' in clean_part) and os.path.exists(clean_part):
+            return clean_part
     return None
 
 def send_request_to_model(prompt_text):
-    # ... (код функции без изменений)
     try:
         print(f"ЛОГ: Отправляю запрос в модель... Размер промпта: ~{len(prompt_text)} символов.")
         prompt_preview = re.sub(r'--- КОНТЕКСТ ПРОЕКТА.*---(.|\n|\r)*--- КОНЕЦ КОНТЕКСТА ---', '--- КОНТЕКСТ ПРОЕКТА (скрыт) ---', prompt_text)
@@ -156,48 +210,56 @@ def send_request_to_model(prompt_text):
         print(f"ЛОГ: ОШИБКА при запросе к API: {e}")
         return None
 
-def get_multiline_input():
-    # ... (код функции без изменений)
-    print("Привет, друже! Опиши задачу (для завершения, нажми Enter три раза подряд):")
-    lines, empty_line_count = [], 0
-    while empty_line_count < 3:
+def get_user_input():
+    """НОВОЕ: Интерактивный ввод цели и опционального лога ошибки."""
+    print("Привет! Опиши свою основную цель. Что должно быть сделано?")
+    goal_lines = []
+    while True:
         try:
             line = input()
-            if line:
-                lines.append(line)
-                empty_line_count = 0
-            else:
-                empty_line_count += 1
-                if empty_line_count < 3: lines.append("")
+            if not line: break
+            goal_lines.append(line)
         except EOFError: break
-    return '\n'.join(lines).rstrip('\n')
+    goal = '\n'.join(goal_lines).strip()
+    if not goal: return None, None
+    
+    print("\nОтлично. Теперь, если есть лог ошибки, вставь его. Если нет, просто нажми Enter.")
+    log_lines = []
+    while True:
+        try:
+            line = input()
+            if not line: break
+            log_lines.append(line)
+        except EOFError: break
+    error_log = '\n'.join(log_lines).strip()
+    
+    return goal, error_log
 
 # --- ГЛАВНЫЙ ЦИКЛ ---
 
 def main():
-    full_user_input = get_multiline_input()
-    if not full_user_input: raise ValueError("Задача не может быть пустой.")
-
-    # КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: Разделяем задачу на "цель" и "лог ошибки"
-    # Эвристика: считаем, что все после "---" или типичных маркеров ошибки - это лог.
-    error_markers = [
-        "Pre-transform error:", "Internal server error:", "Plugin: vite:", "npm ERR!", "Traceback"
-    ]
-    task_parts = re.split(f"({'|'.join(re.escape(m) for m in error_markers)})", full_user_input, 1)
+    """Основной рабочий цикл скрипта."""
+    user_goal, error_log = get_user_input()
     
-    user_goal = task_parts[0].strip()
-    current_task = full_user_input # Изначально работаем с полной задачей
-
+    if not user_goal:
+        raise ValueError("Цель не может быть пустой.")
+        
+    # Формируем первоначальную задачу
+    initial_task = user_goal
+    if error_log:
+        initial_task += "\n\n--- ЛОГ ОШИБКИ ДЛЯ АНАЛИЗА ---\n" + error_log
+    
     project_context = get_project_context()
-    if not project_context: raise ConnectionError("Не удалось получить контекст проекта.")
-
-    current_prompt = get_initial_prompt(project_context, current_task)
+    if not project_context: raise ConnectionError("Не удалось получить первоначальный контекст проекта.")
+    
+    # Первая итерация использует полную задачу с логом
+    current_prompt = get_initial_prompt(project_context, initial_task)
 
     for iteration_count in range(1, MAX_ITERATIONS + 1):
         print(f"\n--- АВТОМАТИЧЕСКАЯ ИТЕРАЦИЯ {iteration_count}/{MAX_ITERATIONS} ---")
         
         answer = send_request_to_model(current_prompt)
-        if not answer: return "Ошибка при запросе к модели."
+        if not answer: return "Ошибка: Не удалось получить ответ от модели."
 
         print("\nПОЛУЧЕН ОТВЕТ МОДЕЛИ:\n" + "="*20 + f"\n{answer}\n" + "="*20)
 
@@ -208,44 +270,36 @@ def main():
         if not commands_to_run:
             return "Модель не предоставила блок команд и не считает задачу выполненной."
 
-        print("\nНайдены следующие shell-команды для автоматического применения:\n" + "-"*20 + f"\n{commands_to_run}\n" + "-"*20)
+        print("\nНайдены shell-команды для применения:\n" + "-"*20 + f"\n{commands_to_run}\n" + "-"*20)
         
         success, failed_command, error_message = apply_shell_commands(commands_to_run)
         
+        project_context = get_project_context()
+        if not project_context: return "Критическая ошибка: не удалось обновить контекст."
+
         if success:
-            print("\nЛОГ: Команды успешно применены. Обновляю контекст для полной верификации.")
-            project_context = get_project_context()
-            if not project_context: return "Не удалось обновить контекст."
-            # Стираем память! Теперь работаем только с чистой целью.
-            current_task = user_goal 
-            current_prompt = get_review_prompt(project_context, current_task)
+            print("\nЛОГ: Команды успешно применены. Готовлюсь к верификации.")
+            # Используем только чистую цель, чтобы модель "забыла" старый лог
+            current_prompt = get_review_prompt(project_context, user_goal)
         else:
-            print("\nЛОГ: Обнаружена ошибка. Запускаю цикл исправления.")
+            print("\nЛОГ: Обнаружена ошибка. Готовлю промпт для исправления.")
             filepath = extract_filepath_from_command(failed_command)
             
-            error_context = ""
+            error_context = f"--- КОНТЕКСТ ПРОЕКТА ---\n{project_context}\n--- КОНЕЦ КОНТЕКСТА ---"
             if filepath and os.path.exists(filepath) and not os.path.isdir(filepath):
-                print(f"ЛОГ: Ошибка в файле '{filepath}'. Готовлю сфокусированный промпт.")
                 with open(filepath, 'r', encoding='utf-8') as f: file_content = f.read()
-                error_context = f"--- СОДЕРЖИМОЕ ФАЙЛА: {filepath} ---\n{file_content}\n--- КОНЕЦ СОДЕРЖИМОГО ФАЙЛА ---"
-            else:
-                print(f"ЛОГ: Не удалось определить файл (найдено: {filepath}). Использую запасной план: полный контекст.")
-                error_context = f"--- КОНТЕКСТ ПРОЕКТА ---\n{project_context}\n--- КОНЕЦ КОНТЕКСТА ---"
-
+                error_context = f"--- СОДЕРЖИМОЕ ФАЙЛА: {filepath} ---\n{file_content}\n--- КОНЕЦ СОДЕРЖИМОГО ФАЙЛА ---\n\n{error_context}"
+            
             current_prompt = get_error_fixing_prompt(
                 failed_command=failed_command, error_message=error_message,
-                task=user_goal, context=error_context) # Передаем чистую цель
+                goal=user_goal, context=error_context)
             
-            continue
-            
-    return f"Достигнут лимит в {MAX_ITERATIONS} итераций."
+    return f"Достигнут лимит в {MAX_ITERATIONS} итераций. Задача не была завершена."
 
 if __name__ == "__main__":
     final_status = "Работа завершена."
-    try:
-        final_status = main()
-    except KeyboardInterrupt:
-        final_status = "Процесс прерван пользователем."
+    try: final_status = main()
+    except KeyboardInterrupt: final_status = "Процесс прерван пользователем."
     except Exception as e:
         print(f"\nКРИТИЧЕСКАЯ НЕПЕРЕХВАЧЕННАЯ ОШИБКА: {e}")
         final_status = f"Скрипт аварийно завершился с ошибкой: {e}"
