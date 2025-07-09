@@ -156,10 +156,7 @@ def notify_user(message):
     system = platform.system()
     try:
         if system == "Darwin":
-            ### ИЗМЕНЕНИЕ 2: Замена звука на более длинный и заметный ###
-            # Звук через afplay (самый надежный способ на macOS)
             subprocess.run(['afplay', '/System/Library/Sounds/Sosumi.aiff'], check=True, timeout=5)
-            ### КОНЕЦ ИЗМЕНЕНИЯ 2 ###
         elif system == "Linux":
             # Всплывающее окно на Ubuntu
             subprocess.run(['zenity', '--info', '--text', message, '--title', 'Sloth Script', '--timeout=10', '--window-icon=info'], check=True, timeout=10)
