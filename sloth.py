@@ -197,8 +197,8 @@ def extract_filepath_from_command(command):
 def send_request_to_model(prompt_text):
     try:
         print(f"ЛОГ: Отправляю запрос в модель... Размер промпта: ~{len(prompt_text)} символов.")
-        prompt_preview = re.sub(r'--- КОНТЕКСТ ПРОЕКТА.*---(.|\n|\r)*--- КОНЕЦ КОНТЕКСТА ---', '--- КОНТЕКСТ ПРОЕКТА (скрыт) ---', prompt_text)
-        prompt_preview = re.sub(r'--- СОДЕРЖИМОЕ ФАЙЛА.*---(.|\n|\r)*--- КОНЕЦ СОДЕРЖИМОГО ФАЙЛА ---', '--- СОДЕРЖИМОЕ ФАЙЛА (скрыто) ---', prompt_preview)
+        prompt_preview = re.sub(r'--- КОНТЕКСТ ПРОЕКТА.*---(.|\n|\r)*--- КОНЕЦ КОНТЕКСТА ---', '--- КОНТЕКСТ ПРОЕКТА (скрыт) ---', prompt_text, flags=re.DOTALL)
+        prompt_preview = re.sub(r'--- СОДЕРЖИМОЕ ФАЙЛА.*---(.|\n|\r)*--- КОНЕЦ СОДЕРЖИМОГО ФАЙЛА ---', '--- СОДЕРЖИМОЕ ФАЙЛА (скрыто) ---', prompt_preview, flags=re.DOTALL)
         print(f"ЛОГ: Структура отправляемого промпта:\n---\n{prompt_preview}\n---")
         response = model.generate_content(prompt_text, request_options={'timeout': API_TIMEOUT_SECONDS})
         if not response.candidates or response.candidates[0].finish_reason.name != "STOP":
@@ -210,30 +210,35 @@ def send_request_to_model(prompt_text):
         print(f"ЛОГ: ОШИБКА при запросе к API: {e}")
         return None
 
+def _read_multiline_input(prompt):
+    """Вспомогательная функция для чтения многострочного ввода до 3-х пустых строк."""
+    print(prompt)
+    lines = []
+    empty_line_count = 0
+    while empty_line_count < 3:
+        try:
+            line = input()
+            if line:
+                lines.append(line)
+                empty_line_count = 0
+            else:
+                empty_line_count += 1
+        except EOFError:
+            break
+    return '\n'.join(lines).strip()
+
 def get_user_input():
-    """НОВОЕ: Интерактивный ввод цели и опционального лога ошибки."""
-    print("Привет! Опиши свою основную цель. Что должно быть сделано?")
-    goal_lines = []
-    while True:
-        try:
-            line = input()
-            if not line: break
-            goal_lines.append(line)
-        except EOFError: break
-    goal = '\n'.join(goal_lines).strip()
-    if not goal: return None, None
-    
-    print("\nОтлично. Теперь, если есть лог ошибки, вставь его. Если нет, просто нажми Enter.")
-    log_lines = []
-    while True:
-        try:
-            line = input()
-            if not line: break
-            log_lines.append(line)
-        except EOFError: break
-    error_log = '\n'.join(log_lines).strip()
-    
-    return goal, error_log
+    """Интерактивный ввод цели и опционального лога ошибки."""
+    goal_prompt = "Привет! Опиши свою основную цель. (Для завершения ввода, нажми Enter 3 раза подряд)"
+    user_goal = _read_multiline_input(goal_prompt)
+
+    if not user_goal:
+        return None, None
+
+    log_prompt = "\nОтлично. Теперь, если есть лог ошибки, вставь его. Если нет, просто нажми Enter 3 раза."
+    error_log = _read_multiline_input(log_prompt)
+
+    return user_goal, error_log
 
 # --- ГЛАВНЫЙ ЦИКЛ ---
 
@@ -244,7 +249,6 @@ def main():
     if not user_goal:
         raise ValueError("Цель не может быть пустой.")
         
-    # Формируем первоначальную задачу
     initial_task = user_goal
     if error_log:
         initial_task += "\n\n--- ЛОГ ОШИБКИ ДЛЯ АНАЛИЗА ---\n" + error_log
@@ -252,7 +256,6 @@ def main():
     project_context = get_project_context()
     if not project_context: raise ConnectionError("Не удалось получить первоначальный контекст проекта.")
     
-    # Первая итерация использует полную задачу с логом
     current_prompt = get_initial_prompt(project_context, initial_task)
 
     for iteration_count in range(1, MAX_ITERATIONS + 1):
@@ -279,7 +282,6 @@ def main():
 
         if success:
             print("\nЛОГ: Команды успешно применены. Готовлюсь к верификации.")
-            # Используем только чистую цель, чтобы модель "забыла" старый лог
             current_prompt = get_review_prompt(project_context, user_goal)
         else:
             print("\nЛОГ: Обнаружена ошибка. Готовлю промпт для исправления.")
