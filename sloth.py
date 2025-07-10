@@ -10,17 +10,23 @@ import sys
 import hashlib
 import json
 
-# --- Класс для цветов в консоли ---
+# --- Класс для цветов в консоли (Палитра "Nordic Calm") ---
 class Colors:
-    HEADER = '\033[95m'
-    OKBLUE = '\033[94m'
-    CYAN = '\033[96m'
-    OKGREEN = '\033[92m'
-    WARNING = '\033[93m'
-    FAIL = '\033[91m'
-    ENDC = '\033[0m'
+    # --- Основные цвета ---
+    FAIL = '\033[38;2;191;97;106m'      # Красный (Aurora Red)
+    OKGREEN = '\033[38;2;163;190;140m'   # Зеленый (Aurora Green)
+    WARNING = '\033[38;2;235;203;139m'   # Желтый (Aurora Yellow)
+    OKBLUE = '\033[38;2;94;129;172m'     # Голубой (Polar Night Blue)
+    HEADER = '\033[38;2;180;142;173m'   # Пурпурный (Aurora Purple)
+    CYAN = '\033[38;2;136;192;208m'     # Бирюзовый (Aurora Cyan)
+    
+    # --- Стили ---
+    ENDC = '\033[0m'                    # Сброс
     BOLD = '\033[1m'
     UNDERLINE = '\033[4m'
+    
+    # --- Дополнительные оттенки для разнообразия (если понадобятся) ---
+    GREY = '\033[38;2;106;114;128m'      # Серый для второстепенной информации
 
 # --- НАСТРОЙКИ ---
 GOOGLE_API_KEY = "AIzaSyCGVITo4g7NqkNXpv2JjgiIguPWvqnbnWM"
