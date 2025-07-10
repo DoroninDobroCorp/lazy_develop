@@ -1,4 +1,3 @@
-
 import vertexai
 from vertexai.generative_models import GenerativeModel, HarmCategory, HarmBlockThreshold
 import google.generativeai as genai
@@ -9,6 +8,7 @@ import re
 import platform
 import sys
 import hashlib
+import json
 
 # --- Класс для цветов в консоли ---
 class Colors:
@@ -31,6 +31,7 @@ MODEL_NAME = "gemini-2.5-pro"
 
 CONTEXT_SCRIPT = 'AskGpt.py'
 CONTEXT_FILE = 'message_1.txt'
+HISTORY_FILE = 'sloth_history.json'
 ALLOWED_COMMANDS = (
     "sed", "rm", "mv", "touch", "mkdir", "npm", "npx", "yarn", "pnpm", "git", "echo", "./", "cat"
 )
@@ -40,13 +41,16 @@ API_TIMEOUT_SECONDS = 600
 # --- Глобальные переменные для модели ---
 model = None
 ACTIVE_API_SERVICE = "N/A"
+# Флаг для запоминания отказа Google AI API В ТЕКУЩЕЙ СЕССИИ. Сбрасывается при каждом запуске.
+GOOGLE_AI_HAS_FAILED_THIS_SESSION = False
 
 def initialize_model():
     """
     Инициализирует модель Gemini.
     Приоритет: Google API Key. Запасной вариант: Vertex AI.
+    Запоминает, если Google API Key отказал в текущей сессии.
     """
-    global model, ACTIVE_API_SERVICE
+    global model, ACTIVE_API_SERVICE, GOOGLE_AI_HAS_FAILED_THIS_SESSION
 
     print(f"{Colors.CYAN}⚙️  ЛОГ: Начинаю конфигурацию. Модель: {MODEL_NAME}{Colors.ENDC}")
 
@@ -54,8 +58,10 @@ def initialize_model():
         "temperature": 1, "top_p": 1, "top_k": 1, "max_output_tokens": 32768
     }
 
-    if GOOGLE_API_KEY and "ВАШ_API_КЛЮЧ" not in GOOGLE_API_KEY:
-        print(f"{Colors.CYAN}🔑 ЛОГ: Найден API ключ. Попытка инициализации через Google AI...{Colors.ENDC}")
+    # Проверяем флаг. Если API ключ уже отказал в этой сессии, не пытаемся его использовать снова.
+    if not GOOGLE_AI_HAS_FAILED_THIS_SESSION and GOOGLE_API_KEY and "ВАШ_API_КЛЮЧ" not in GOOGLE_API_KEY:
+        # <<< ИЗМЕНЕНИЕ: Более явное логирование >>>
+        print(f"{Colors.CYAN}🔑 ЛОГ: Пробую приоритетный сервис: Google AI (API Key)...{Colors.ENDC}")
         try:
             genai.configure(api_key=GOOGLE_API_KEY)
             genai_safety_settings = {
@@ -69,14 +75,18 @@ def initialize_model():
                 generation_config=generation_config,
                 safety_settings=genai_safety_settings
             )
-            model.generate_content("test", request_options={"timeout": 60}) # Проверка с коротким таймаутом
+            # Короткий тестовый запрос для проверки работоспособности ключа
+            model.generate_content("test", request_options={"timeout": 60})
             ACTIVE_API_SERVICE = "Google AI (API Key)"
             print(f"{Colors.OKGREEN}✅ ЛОГ: Успешно инициализировано через {ACTIVE_API_SERVICE}.{Colors.ENDC}")
             return
         except Exception as e:
             print(f"{Colors.WARNING}⚠️  ПРЕДУПРЕЖДЕНИЕ: Не удалось инициализировать через Google AI API Key: {e}{Colors.ENDC}")
-            print(f"{Colors.CYAN}🔄 ЛОГ: Переключаюсь на запасной вариант (Vertex AI).{Colors.ENDC}")
+            print(f"{Colors.CYAN}🔄 ЛОГ: Переключаюсь на запасной вариант (Vertex AI) для этой сессии.{Colors.ENDC}")
+            GOOGLE_AI_HAS_FAILED_THIS_SESSION = True # Запоминаем отказ на время этой сессии
             model = None
+    elif GOOGLE_AI_HAS_FAILED_THIS_SESSION:
+        print(f"{Colors.CYAN}🔑 ЛОГ: Google AI API ранее отказал в этой сессии. Сразу использую Vertex AI.{Colors.ENDC}")
     else:
         print(f"{Colors.CYAN}🔑 ЛОГ: API ключ не указан. Использую Vertex AI.{Colors.ENDC}")
 
@@ -102,10 +112,9 @@ def initialize_model():
         sys.exit(1)
 
 
-# --- БЛОК ПРОМПТ-ШАБЛОНОВ (БЕЗ ИЗМЕНЕНИЙ) ---
+# --- БЛОК ПРОМПТ-ШАБЛОНОВ ---
 
 def get_command_rules():
-    """Возвращает базовый набор правил для модели."""
     return f"""
 Ты — AI-ассистент в автоматизированной системе. Твоя задача — анализировать код и генерировать shell-команды для его изменения.
 
@@ -124,8 +133,8 @@ def get_command_rules():
         1. Блок команд, обернутый в ```bash ... ```.
         2. Сразу после него — блок с кратким описанием твоей стратегии, обернутый в ```summary ... ```.
     *   **Завершение:**
-        *   Если задача полностью решена и **не требует ручных действий от человека**, напиши **только** одно слово: `ГОТОВО`.
-        *   Если после твоих правок **человеку нужно выполнить команды** (например, `npm start`), сначала напиши `ГОТОВО`, а затем добавь блок ```manual ... ``` с инструкциями.
+        *   Если задача полностью решена и **не требует ручных действий от человека**, напиши **только** `ГОТОВО`. После этого слова добавь блок ```done_summary ... ``` с кратким перечнем ключевых шагов, которые привели к решению.
+        *   Если после твоих правок **человеку нужно выполнить команды** (например, `npm start`), сначала напиши `ГОТОВО`, затем добавь блок ```done_summary ... ```, и только потом — блок ```manual ... ``` с инструкциями.
 
 4.  **ФОКУС И ПРАГМАТИЗМ:**
     *   Твоя главная цель — решить **исходную задачу** пользователя. Как только функциональность заработает, напиши `ГОТОВО`.
@@ -136,12 +145,21 @@ def get_command_rules():
 6.  **ПОЛНОТА КОДА:** **ЗАПРЕЩЕНО** использовать плейсхолдеры, многоточия (...) или комментарии (`// ... остальной код`) для сокращения блоков кода. Всегда предоставляй полный, готовый к выполнению код.
 """
 
-def get_initial_prompt(context, task):
-    """Создает первоначальный промпт для старта работы (с возможным логом ошибки)."""
-    return f"{get_command_rules()}\n--- КОНТЕКСТ ПРОЕКТА ---\n{context}\n--- КОНЕЦ КОНТЕКСТА ---\nЗадача: {task}\nПроанализируй задачу и предоставь ответ, строго следуя правилам."
+def get_initial_prompt(context, task, fix_history=None):
+    history_prompt_section = ""
+    if fix_history:
+        history_prompt_section = f"""
+--- ИСТОРИЯ ПРЕДЫДУЩЕГО РЕШЕНИЯ, КОТОРОЕ ОКАЗАЛОСЬ НЕВЕРНЫМ ---
+Ты уже пытался решить эту задачу и сообщил 'ГОТОВО', но это было ошибкой.
+Вот краткое изложение твоих предыдущих действий:
+{fix_history}
+--- КОНЕЦ ИСТОРИИ ---
+Проанализируй свою прошлую ошибку, новую информацию от пользователя и начни заново.
+"""
+    return f"{get_command_rules()}\n{history_prompt_section}\n--- КОНТЕКСТ ПРОЕКТА ---\n{context}\n--- КОНЕЦ КОНТЕКСТА ---\nЗадача: {task}\nПроанализируй задачу и предоставь ответ, строго следуя правилам."
+
 
 def get_review_prompt(context, goal, iteration_count, attempt_history):
-    """Создает промпт для верификации, включая полную историю попыток."""
     iteration_info = ""
     if iteration_count >= 4:
         iteration_info = f"""
@@ -174,7 +192,6 @@ def get_review_prompt(context, goal, iteration_count, attempt_history):
 """
 
 def get_error_fixing_prompt(failed_command, error_message, goal, context, iteration_count, attempt_history):
-    """Создает промпт для исправления ошибки, включая полную историю попыток."""
     iteration_info = ""
     if iteration_count >= 4:
         iteration_info = f"""
@@ -261,6 +278,11 @@ def extract_manual_steps_block(text):
     if match: return match.group(1).strip()
     return None
 
+def extract_done_summary_block(text):
+    match = re.search(r"```done_summary\s*(.*?)\s*```", text, re.DOTALL)
+    if match: return match.group(1).strip()
+    return None
+
 def get_file_hash(filepath):
     if not os.path.exists(filepath) or os.path.isdir(filepath): return None
     h = hashlib.sha256()
@@ -320,34 +342,61 @@ def extract_filepath_from_command(command):
             return clean_part
     return None
 
-# --- ИСПРАВЛЕНИЕ: Добавлен таймаут и улучшено логирование ---
-def send_request_to_model(prompt_text, iteration_count):
-    global model
+def save_prompt_for_debugging(prompt_text):
     try:
-        print(f"{Colors.CYAN}🧠 ЛОГ: Отправляю запрос в модель (через {ACTIVE_API_SERVICE})...{Colors.ENDC}")
-        prompt_preview = re.sub(r'--- КОНТЕКСТ ПРОЕКТА.*---(.|\n|\r)*--- КОНЕЦ КОНТЕКСТА ---', '--- КОНТЕКСТ ПРОЕКТА (скрыт) ---', prompt_text, flags=re.DOTALL)
-        prompt_preview = re.sub(r'--- СОДЕРЖИМОЕ ФАЙЛА.*---(.|\n|\r)*--- КОНЕЦ СОДЕРЖИМОГО ФАЙЛА ---', '--- СОДЕРЖИМОЕ ФАЙЛА (скрыто) ---', prompt_preview, flags=re.DOTALL)
-        prompt_preview = re.sub(r'--- ИСТОРИЯ ПРЕДЫДУЩИХ ПОПЫТОК.*---(.|\n|\r)*--- КОНЕЦ ИСТОРИИ ---', '--- ИСТОРИЯ ПРЕДЫДУЩИХ ПОПЫТОК (скрыта) ---', prompt_preview, flags=re.DOTALL)
+        with open("sloth_debug_prompt.txt", "w", encoding='utf-8') as f:
+            f.write(prompt_text)
+        print(f"{Colors.OKBLUE}   - Отладочная информация: Полный промпт сохранен в 'sloth_debug_prompt.txt'.{Colors.ENDC}")
+    except Exception as e:
+        print(f"{Colors.WARNING}   - ВНИМАНИЕ: Не удалось сохранить отладочный файл промпта: {e}{Colors.ENDC}")
 
-        print(f"{Colors.OKBLUE}  [Детали] Итерация {iteration_count}. Структура отправляемого промпта:\n---\n{prompt_preview}\n---{Colors.ENDC}")
+def send_request_to_model(prompt_text, iteration_count):
+    global model, GOOGLE_AI_HAS_FAILED_THIS_SESSION
+    try:
+        prompt_size = len(prompt_text)
+        print(f"{Colors.CYAN}🧠 ЛОГ: [Итерация {iteration_count}] Готовлю запрос в модель ({ACTIVE_API_SERVICE}).{Colors.ENDC}")
+        print(f"{Colors.OKBLUE}   - Общий размер промпта: {prompt_size} символов.{Colors.ENDC}")
+        save_prompt_for_debugging(prompt_text)
 
-        # ЕДИНСТВЕННОЕ ИЗМЕНЕНИЕ: Добавляем request_options с таймаутом
+        if prompt_size > 100000:
+             print(f"{Colors.WARNING}   - ВНИМАНИЕ: Размер промпта очень большой. Ответ может занять несколько минут.{Colors.ENDC}")
+
         request_options = {"timeout": API_TIMEOUT_SECONDS}
-        print(f"{Colors.CYAN}⏳ ЛОГ: Ожидаю ответ от модели... (таймаут: {API_TIMEOUT_SECONDS} секунд){Colors.ENDC}")
+        print(f"{Colors.CYAN}⏳ ЛОГ: Отправляю запрос и ожидаю ответ... (таймаут: {API_TIMEOUT_SECONDS} секунд){Colors.ENDC}")
         response = model.generate_content(prompt_text, request_options=request_options)
-        print(f"{Colors.OKGREEN}✅ ЛОГ: Ответ от модели получен.{Colors.ENDC}")
-
+        
+        if response.prompt_feedback and response.prompt_feedback.block_reason:
+            reason_name = response.prompt_feedback.block_reason.name
+            print(f"{Colors.FAIL}❌ ЛОГ: ЗАПРОС БЫЛ ЗАБЛОКИРОВАН API.{Colors.ENDC}")
+            print(f"{Colors.FAIL}   - Причина блокировки: {reason_name}{Colors.ENDC}")
+            print(f"{Colors.FAIL}   - Рейтинги безопасности: {response.prompt_feedback.safety_ratings}{Colors.ENDC}")
+            raise ValueError(f"Промпт заблокирован из-за настроек безопасности. Причина: {reason_name}")
 
         if not response.candidates or response.candidates[0].finish_reason.name != "STOP":
-            reason = response.candidates[0].finish_reason.name if response.candidates else "Неизвестно"
+            reason = response.candidates[0].finish_reason.name if response.candidates else "Кандидат не сгенерирован"
+            safety_ratings = response.candidates[0].safety_ratings if response.candidates else "Нет данных"
+            print(f"{Colors.FAIL}❌ ЛОГ: Ответ от модели был прерван или неполный.{Colors.ENDC}")
+            print(f"{Colors.FAIL}   - Причина завершения: {reason}{Colors.ENDC}")
+            print(f"{Colors.FAIL}   - Рейтинги безопасности ответа: {safety_ratings}{Colors.ENDC}")
             raise ValueError(f"Ответ от модели был прерван. Причина: {reason}")
+        
+        print(f"{Colors.OKGREEN}✅ ЛОГ: Ответ от модели получен успешно.{Colors.ENDC}")
         return response.text
+        
     except Exception as e:
         print(f"{Colors.FAIL}❌ ЛОГ: ОШИБКА при запросе к API ({ACTIVE_API_SERVICE}): {e}{Colors.ENDC}")
-        if ACTIVE_API_SERVICE == "Google AI (API Key)":
-             print(f"{Colors.WARNING}⚠️  ПРЕДУПРЕЖДЕНИЕ: Ошибка с API ключом. Попробую переключиться на Vertex AI...{Colors.ENDC}")
-             model = None
-             initialize_model()
+        
+        error_str = str(e).lower()
+        is_quota_error = "quota" in error_str or "rate limit" in error_str or "exceeded" in error_str
+
+        if ACTIVE_API_SERVICE == "Google AI (API Key)" and is_quota_error:
+            print(f"{Colors.FAIL}🚨 ЛОГ: ОБНАРУЖЕНА ОШИБКА КВОТЫ В GOOGLE AI API!{Colors.ENDC}")
+            print(f"{Colors.CYAN}   - Устанавливаю флаг отказа и перманентно (на эту сессию) переключаюсь на Vertex AI...{Colors.ENDC}")
+            GOOGLE_AI_HAS_FAILED_THIS_SESSION = True
+            model = None
+            initialize_model()
+        
+        print(f"{Colors.CYAN}   - Проверьте файл 'sloth_debug_prompt.txt', чтобы увидеть точный промпт, вызвавший ошибку.{Colors.ENDC}")
         return None
 
 def _read_multiline_input(prompt):
@@ -383,10 +432,58 @@ def get_user_input():
 
     return user_goal, error_log
 
+def save_completion_history(goal, summary):
+    history_data = {"previous_attempts": []}
+    if os.path.exists(HISTORY_FILE):
+        try:
+            with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
+                history_data = json.load(f)
+        except json.JSONDecodeError:
+            print(f"{Colors.WARNING}⚠️  ПРЕДУПРЕЖДЕНИЕ: Файл истории {HISTORY_FILE} поврежден. Создаю новый.{Colors.ENDC}")
+
+    new_entry = {
+        "initial_goal": goal,
+        "solution_summary": summary
+    }
+    history_data.get("previous_attempts", []).insert(0, new_entry)
+
+    try:
+        with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
+            json.dump(history_data, f, indent=2, ensure_ascii=False)
+        print(f"{Colors.OKGREEN}💾 ЛОГ: История решения сохранена в {HISTORY_FILE}.{Colors.ENDC}")
+    except Exception as e:
+        print(f"{Colors.FAIL}❌ ЛОГ: Не удалось сохранить историю решения: {e}{Colors.ENDC}")
+
+def load_fix_history():
+    if not os.path.exists(HISTORY_FILE):
+        return None
+    try:
+        with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
+            history_data = json.load(f)
+        
+        attempts = history_data.get("previous_attempts", [])
+        if not attempts:
+            return None
+        
+        last_attempt = attempts[0]
+        
+        text_history = (
+            f"Это твоя самая последняя попытка решения, которая оказалась неверной:\n"
+            f"  - Поставленная задача: {last_attempt.get('initial_goal', 'N/A')}\n"
+            f"  - Твое 'решение': {last_attempt.get('solution_summary', 'N/A')}"
+        )
+        return text_history
+    except Exception as e:
+        print(f"{Colors.FAIL}❌ ЛОГ: Не удалось загрузить или прочитать файл истории {HISTORY_FILE}: {e}{Colors.ENDC}")
+        return None
+
 
 # --- ГЛАВНЫЙ ЦИКЛ ---
-def main():
+def main(is_fix_mode=False):
     """Основной рабочий цикл скрипта."""
+    if is_fix_mode:
+        print(f"{Colors.WARNING}🔧 ЛОГ: Запуск в режиме исправления (--fix).{Colors.ENDC}")
+
     user_goal, error_log = get_user_input()
 
     if not user_goal:
@@ -398,8 +495,14 @@ def main():
 
     project_context = get_project_context()
     if not project_context: raise ConnectionError("Не удалось получить первоначальный контекст проекта.")
+    
+    fix_history_content = None
+    if is_fix_mode:
+        fix_history_content = load_fix_history()
+        if fix_history_content:
+            print(f"{Colors.CYAN} historial ЛОГ: Загружена история последнего неудачного решения.{Colors.ENDC}")
 
-    current_prompt = get_initial_prompt(project_context, initial_task)
+    current_prompt = get_initial_prompt(project_context, initial_task, fix_history=fix_history_content)
     attempt_history = []
 
     for iteration_count in range(1, MAX_ITERATIONS + 1):
@@ -412,11 +515,22 @@ def main():
                 continue
             else:
                 return "Критическая ошибка: Не удалось получить ответ от модели и переключиться на запасной API."
-
-        print(f"\n{Colors.OKGREEN}📦 ПОЛУЧЕН ОТВЕТ МОДЕЛИ:{Colors.ENDC}\n" + "="*20 + f"\n{answer}\n" + "="*20)
-
+        
         if answer.strip().upper().startswith("ГОТОВО"):
+            done_summary = extract_done_summary_block(answer)
             manual_steps = extract_manual_steps_block(answer)
+
+            if not done_summary:
+                print(f"{Colors.WARNING}⚠️ ПРЕДУПРЕЖДЕНИЕ: Модель сообщила 'ГОТОВО', но не предоставила блок `done_summary`. История не будет сохранена.{Colors.ENDC}")
+                done_summary = "Модель не предоставила итоговое резюме."
+            else:
+                print(f"{Colors.OKGREEN}📄 ИТОГОВОЕ РЕЗЮМЕ ОТ МОДЕЛИ:\n{Colors.CYAN}{done_summary}{Colors.ENDC}")
+                if is_fix_mode and os.path.exists(HISTORY_FILE):
+                    os.remove(HISTORY_FILE)
+                    print(f"{Colors.CYAN}🗑️  ЛОГ: Задача решена в режиме --fix. Старая история ({HISTORY_FILE}) очищена.{Colors.ENDC}")
+                save_completion_history(user_goal, done_summary)
+
+
             final_message = f"{Colors.OKGREEN}✅ Задача выполнена успешно! (за {iteration_count} итераций){Colors.ENDC}"
             if manual_steps:
                 final_message += f"\n\n{Colors.WARNING}✋ ВАЖНО: Требуются следующие ручные действия:{Colors.ENDC}\n" + "-"*20 + f"\n{manual_steps}\n" + "-"*20
@@ -424,7 +538,11 @@ def main():
 
         commands_to_run = extract_todo_block(answer)
         if not commands_to_run:
-            return f"{Colors.FAIL}Модель не предоставила блок команд и не считает задачу выполненной.{Colors.ENDC}"
+            print(f"{Colors.FAIL}❌ ЛОГ: Модель вернула ответ без команд и без статуса 'ГОТОВО'. Ответ модели:\n{answer}{Colors.ENDC}")
+            with open("sloth_debug_bad_response.txt", "w", encoding='utf-8') as f:
+                f.write(answer)
+            return f"{Colors.FAIL}Модель не предоставила блок команд и не считает задачу выполненной. Ответ сохранен в sloth_debug_bad_response.txt{Colors.ENDC}"
+
 
         strategy_description = extract_summary_block(answer)
         if not strategy_description:
@@ -474,17 +592,33 @@ def main():
     return f"{Colors.WARNING}⌛ Достигнут лимит в {MAX_ITERATIONS} итераций. Задача не была завершена.{Colors.ENDC}"
 
 if __name__ == "__main__":
+    is_fix_mode = '--fix' in sys.argv or '-fix' in sys.argv
+
+    if not is_fix_mode and os.path.exists(HISTORY_FILE):
+        try:
+            os.remove(HISTORY_FILE)
+            print(f"{Colors.CYAN}🗑️  ЛОГ: Очищена старая история ({HISTORY_FILE}).{Colors.ENDC}")
+        except Exception as e:
+            print(f"{Colors.WARNING}⚠️  ПРЕДУПРЕЖДЕНИЕ: Не удалось удалить файл истории: {e}{Colors.ENDC}")
+    
+    if os.path.exists("sloth_debug_prompt.txt"):
+        os.remove("sloth_debug_prompt.txt")
+    if os.path.exists("sloth_debug_bad_response.txt"):
+        os.remove("sloth_debug_bad_response.txt")
+
+
     initialize_model()
     final_status = "Работа завершена."
     try:
         if model:
-            final_status = main()
+            final_status = main(is_fix_mode)
         else:
             final_status = f"{Colors.FAIL}❌ Не удалось запустить основной цикл, так как модель не была инициализирована.{Colors.ENDC}"
     except KeyboardInterrupt:
         final_status = f"{Colors.OKBLUE}🔵 Процесс прерван пользователем.{Colors.ENDC}"
     except Exception as e:
-        print(f"\n{Colors.FAIL}❌ КРИТИЧЕСКАЯ НЕПЕРЕХВАЧЕННАЯ ОШИБКА: {e}{Colors.ENDC}")
+        import traceback
+        traceback.print_exc()
         final_status = f"{Colors.FAIL}❌ Скрипт аварийно завершился с ошибкой: {e}{Colors.ENDC}"
     finally:
         print(f"\n{final_status}")
