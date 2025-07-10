@@ -26,7 +26,7 @@ USER_IGNORE_FILES = (
     # Common
     ".DS_Store, .gitignore, README.md, "
     # Specific user files
-    "analyzer_wide, tsconfig.tsbuildinfo, chat_sender.py, chat_sender_g.py, sloth.py"
+    "analyzer_wide, tsconfig.tsbuildinfo, chat_sender.py, chat_sender_g.py, sloth.py, sloth_debug_prompt.txt, sloth_debug_bad_response.txt"
 )
 
 # Список папок для игнорирования (через запятую).
@@ -156,6 +156,20 @@ def write_chunks(full_text):
     return chunks
 
 def main():
+    # --- НАЧАЛО ИСПРАВЛЕНИЯ ---
+    # ШАГ 0: Принудительно удаляем старые файлы контекста перед созданием новых.
+    # Это гарантирует, что мы каждый раз начинаем с чистого листа.
+    print("Очистка старых файлов контекста...")
+    for i in range(1, 100):  # Проверяем и удаляем message_1.txt ... message_99.txt
+        old_file = f"{OUTPUT_PREFIX}{i}.txt"
+        if os.path.exists(old_file):
+            try:
+                os.remove(old_file)
+                print(f"Удален старый файл: {old_file}")
+            except OSError as e:
+                print(f"Ошибка при удалении {old_file}: {e}")
+    # --- КОНЕЦ ИСПРАВЛЕНИЯ ---
+
     all_lines = []
     explanation = (
         "сейчас я выгружу тебя сначала дерево файлов с размерами в символах, "
@@ -168,18 +182,16 @@ def main():
     # 1. Вычисляем размеры и получаем пути к файлам за один проход
     file_sizes, dir_sizes, file_paths = calculate_sizes(BASE_DIR)
 
-    # НОВОЕ: Находим топ-N самых больших файлов
-    # Сортируем словарь file_sizes по значениям (размерам) в обратном порядке
+    # 2. Находим топ-N самых больших файлов
     sorted_files = sorted(file_sizes.items(), key=lambda item: item[1], reverse=True)
-    # Создаем set с путями к самым большим файлам для быстрой проверки
     top_files_set = set(filepath for filepath, size in sorted_files[:TOP_N_FILES])
     
-    # 2. Строим дерево папок с размерами, передавая информацию о самых больших файлах
+    # 3. Строим дерево папок с размерами, передавая информацию о самых больших файлах
     tree = build_tree(BASE_DIR, file_sizes, dir_sizes, top_files_set)
     all_lines.append("\n--- Структура проекта (с размерами в символах) ---\n")
     all_lines.append(tree)
     
-    # 3. Добавляем содержимое файлов
+    # 4. Добавляем содержимое файлов
     all_lines.append("\n--- Содержимое файлов ---\n")
     for path in sorted(file_paths):
         rel_path = os.path.relpath(path, BASE_DIR)
@@ -190,10 +202,11 @@ def main():
         else:
             all_lines.append("Не удалось прочитать содержимое файла.")
     
-    # 4. Собираем все в один большой текст и разбиваем на чанки
+    # 5. Собираем все в один большой текст и разбиваем на чанки
     full_text = "\n".join(all_lines)
     chunks = write_chunks(full_text)
     
+    # 6. Записываем чанки в файлы (теперь уже после очистки)
     for i, chunk in enumerate(chunks, 1):
         out_filename = f"{OUTPUT_PREFIX}{i}.txt"
         with open(out_filename, "w", encoding="utf-8") as out_file:
