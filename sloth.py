@@ -1,11 +1,7 @@
-# -*- coding: utf-8 -*-
-"""
-Автоматизированный AI-ассистент для написания и исправления кода.
-Скрипт интерактивно запрашивает у пользователя цель и опциональный лог ошибки,
-а затем итеративно взаимодействует с моделью Gemini для достижения цели.
-"""
+
 import vertexai
 from vertexai.generative_models import GenerativeModel, HarmCategory, HarmBlockThreshold
+import google.generativeai as genai
 import os
 import subprocess
 import time
@@ -27,6 +23,8 @@ class Colors:
     UNDERLINE = '\033[4m'
 
 # --- НАСТРОЙКИ ---
+GOOGLE_API_KEY = "AIzaSyCGVITo4g7NqkNXpv2JjgiIguPWvqnbnWM"
+
 GOOGLE_CLOUD_PROJECT = "useful-gearbox-464618-v3"
 GOOGLE_CLOUD_LOCATION = "us-central1"
 MODEL_NAME = "gemini-2.5-pro"
@@ -39,35 +37,72 @@ ALLOWED_COMMANDS = (
 MAX_ITERATIONS = 15
 API_TIMEOUT_SECONDS = 600
 
-# --- КОНФИГУРАЦИЯ МОДЕЛИ ---
-print(f"{Colors.CYAN}⚙️  ЛОГ: Начинаю конфигурацию. Модель: {MODEL_NAME}{Colors.ENDC}")
-try:
-    vertexai.init(project=GOOGLE_CLOUD_PROJECT, location=GOOGLE_CLOUD_LOCATION)
-    print(f"{Colors.OKGREEN}✅ ЛОГ: Vertex AI SDK успешно инициализирован для проекта '{GOOGLE_CLOUD_PROJECT}'.{Colors.ENDC}")
-except Exception as e:
-    print(f"{Colors.FAIL}❌ ЛОГ: ОШИБКА инициализации Vertex AI SDK: {e}{Colors.ENDC}")
-    print(f"{Colors.WARNING}⚠️  ПОДСКАЗКА: Убедитесь, что вы аутентифицированы. Выполните в терминале: gcloud auth application-default login{Colors.ENDC}")
-    sys.exit(1)
+# --- Глобальные переменные для модели ---
+model = None
+ACTIVE_API_SERVICE = "N/A"
 
-generation_config = {
-    "temperature": 1, "top_p": 1, "top_k": 1, "max_output_tokens": 32768
-}
-safety_settings = {
-    HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
-    HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
-    HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
-    HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
-}
+def initialize_model():
+    """
+    Инициализирует модель Gemini.
+    Приоритет: Google API Key. Запасной вариант: Vertex AI.
+    """
+    global model, ACTIVE_API_SERVICE
 
-model = GenerativeModel(
-    model_name=MODEL_NAME,
-    generation_config=generation_config,
-    safety_settings=safety_settings
-)
-print(f"{Colors.OKGREEN}✅ ЛОГ: Модель '{MODEL_NAME}' создана.{Colors.ENDC}")
+    print(f"{Colors.CYAN}⚙️  ЛОГ: Начинаю конфигурацию. Модель: {MODEL_NAME}{Colors.ENDC}")
+
+    generation_config = {
+        "temperature": 1, "top_p": 1, "top_k": 1, "max_output_tokens": 32768
+    }
+
+    if GOOGLE_API_KEY and "ВАШ_API_КЛЮЧ" not in GOOGLE_API_KEY:
+        print(f"{Colors.CYAN}🔑 ЛОГ: Найден API ключ. Попытка инициализации через Google AI...{Colors.ENDC}")
+        try:
+            genai.configure(api_key=GOOGLE_API_KEY)
+            genai_safety_settings = {
+                'HARM_CATEGORY_HARASSMENT': 'block_medium_and_above',
+                'HARM_CATEGORY_HATE_SPEECH': 'block_medium_and_above',
+                'HARM_CATEGORY_SEXUALLY_EXPLICIT': 'block_medium_and_above',
+                'HARM_CATEGORY_DANGEROUS_CONTENT': 'block_none'
+            }
+            model = genai.GenerativeModel(
+                model_name=MODEL_NAME,
+                generation_config=generation_config,
+                safety_settings=genai_safety_settings
+            )
+            model.generate_content("test", request_options={"timeout": 60}) # Проверка с коротким таймаутом
+            ACTIVE_API_SERVICE = "Google AI (API Key)"
+            print(f"{Colors.OKGREEN}✅ ЛОГ: Успешно инициализировано через {ACTIVE_API_SERVICE}.{Colors.ENDC}")
+            return
+        except Exception as e:
+            print(f"{Colors.WARNING}⚠️  ПРЕДУПРЕЖДЕНИЕ: Не удалось инициализировать через Google AI API Key: {e}{Colors.ENDC}")
+            print(f"{Colors.CYAN}🔄 ЛОГ: Переключаюсь на запасной вариант (Vertex AI).{Colors.ENDC}")
+            model = None
+    else:
+        print(f"{Colors.CYAN}🔑 ЛОГ: API ключ не указан. Использую Vertex AI.{Colors.ENDC}")
+
+    try:
+        print(f"{Colors.CYAN}🔩 ЛОГ: Попытка инициализации через Vertex AI...{Colors.ENDC}")
+        vertexai.init(project=GOOGLE_CLOUD_PROJECT, location=GOOGLE_CLOUD_LOCATION)
+        vertex_safety_settings = {
+            HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+            HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+            HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+        }
+        model = GenerativeModel(
+            model_name=MODEL_NAME,
+            generation_config=generation_config,
+            safety_settings=vertex_safety_settings
+        )
+        ACTIVE_API_SERVICE = "Vertex AI"
+        print(f"{Colors.OKGREEN}✅ ЛОГ: Vertex AI SDK успешно инициализирован. Используется {ACTIVE_API_SERVICE}.{Colors.ENDC}")
+    except Exception as e:
+        print(f"{Colors.FAIL}❌ ЛОГ: КРИТИЧЕСКАЯ ОШИБКА: Не удалось инициализировать модель ни одним из способов.{Colors.ENDC}")
+        print(f"{Colors.FAIL}   - Ошибка Vertex AI: {e}{Colors.ENDC}")
+        sys.exit(1)
 
 
-# --- БЛОК ПРОМПТ-ШАБЛОНОВ ---
+# --- БЛОК ПРОМПТ-ШАБЛОНОВ (БЕЗ ИЗМЕНЕНИЙ) ---
 
 def get_command_rules():
     """Возвращает базовый набор правил для модели."""
@@ -201,7 +236,7 @@ def get_project_context():
         if os.path.exists(context_file_path): os.remove(context_file_path)
 
         subprocess.run(['python3', script_to_run_path], check=True, capture_output=True, text=True, encoding='utf-8')
-        
+
         with open(context_file_path, 'r', encoding='utf-8') as f:
             context_data = f.read()
 
@@ -245,9 +280,9 @@ def apply_shell_commands(commands_str):
     try:
         is_macos = platform.system() == "Darwin"
         commands_str_adapted = re.sub(r"sed -i ", "sed -i '.bak' ", commands_str) if is_macos else commands_str
-            
+
         full_command = f"set -e\n{commands_str_adapted}"
-        
+
         print(f"{Colors.WARNING}⚡️ ЛОГ: Выполняю блок команд (с set -e):\n---\n{full_command}\n---{Colors.ENDC}")
         result = subprocess.run(['bash', '-c', full_command], capture_output=True, text=True, encoding='utf-8')
 
@@ -256,13 +291,13 @@ def apply_shell_commands(commands_str):
             print(f"{Colors.FAIL}❌ ЛОГ: КРИТИЧЕСКАЯ ОШИБКА при выполнении блока команд.\n{error_msg}{Colors.ENDC}")
             return False, commands_str, result.stderr.strip() or "Команда провалилась без вывода в stderr."
 
-        if result.stderr: 
+        if result.stderr:
             print(f"{Colors.WARNING}⚠️  ПРЕДУПРЕЖДЕНИЕ (STDERR от успешной команды):\n{result.stderr.strip()}{Colors.ENDC}")
-        
+
         if is_macos: subprocess.run("find . -name '*.bak' -delete", shell=True, check=True)
 
         hashes_after = {fp: get_file_hash(fp) for fp in hashes_before.keys()}
-        
+
         if hashes_before and all(hashes_before.get(fp) == hashes_after.get(fp) for fp in hashes_before):
             error_msg = "Команда выполнилась успешно, но не изменила ни одного из целевых файлов. Вероятно, шаблон (например, в sed) не был найден или путь к файлу неверен."
             final_error_message = result.stderr.strip() if result.stderr else error_msg
@@ -285,24 +320,34 @@ def extract_filepath_from_command(command):
             return clean_part
     return None
 
+# --- ИСПРАВЛЕНИЕ: Добавлен таймаут и улучшено логирование ---
 def send_request_to_model(prompt_text, iteration_count):
+    global model
     try:
-        print(f"{Colors.CYAN}🧠 ЛОГ: Отправляю запрос в модель... Размер промпта: ~{len(prompt_text)} символов.{Colors.ENDC}")
+        print(f"{Colors.CYAN}🧠 ЛОГ: Отправляю запрос в модель (через {ACTIVE_API_SERVICE})...{Colors.ENDC}")
         prompt_preview = re.sub(r'--- КОНТЕКСТ ПРОЕКТА.*---(.|\n|\r)*--- КОНЕЦ КОНТЕКСТА ---', '--- КОНТЕКСТ ПРОЕКТА (скрыт) ---', prompt_text, flags=re.DOTALL)
         prompt_preview = re.sub(r'--- СОДЕРЖИМОЕ ФАЙЛА.*---(.|\n|\r)*--- КОНЕЦ СОДЕРЖИМОГО ФАЙЛА ---', '--- СОДЕРЖИМОЕ ФАЙЛА (скрыто) ---', prompt_preview, flags=re.DOTALL)
         prompt_preview = re.sub(r'--- ИСТОРИЯ ПРЕДЫДУЩИХ ПОПЫТОК.*---(.|\n|\r)*--- КОНЕЦ ИСТОРИИ ---', '--- ИСТОРИЯ ПРЕДЫДУЩИХ ПОПЫТОК (скрыта) ---', prompt_preview, flags=re.DOTALL)
-        
+
         print(f"{Colors.OKBLUE}  [Детали] Итерация {iteration_count}. Структура отправляемого промпта:\n---\n{prompt_preview}\n---{Colors.ENDC}")
-        
-        response = model.generate_content(prompt_text)
+
+        # ЕДИНСТВЕННОЕ ИЗМЕНЕНИЕ: Добавляем request_options с таймаутом
+        request_options = {"timeout": API_TIMEOUT_SECONDS}
+        print(f"{Colors.CYAN}⏳ ЛОГ: Ожидаю ответ от модели... (таймаут: {API_TIMEOUT_SECONDS} секунд){Colors.ENDC}")
+        response = model.generate_content(prompt_text, request_options=request_options)
+        print(f"{Colors.OKGREEN}✅ ЛОГ: Ответ от модели получен.{Colors.ENDC}")
+
 
         if not response.candidates or response.candidates[0].finish_reason.name != "STOP":
             reason = response.candidates[0].finish_reason.name if response.candidates else "Неизвестно"
-            print(f"{Colors.FAIL}❌ ЛОГ: ОШИБКА: Ответ от модели не получен или был прерван. Причина: {reason}{Colors.ENDC}")
-            return None
+            raise ValueError(f"Ответ от модели был прерван. Причина: {reason}")
         return response.text
     except Exception as e:
-        print(f"{Colors.FAIL}❌ ЛОГ: ОШИБКА при запросе к API: {e}{Colors.ENDC}")
+        print(f"{Colors.FAIL}❌ ЛОГ: ОШИБКА при запросе к API ({ACTIVE_API_SERVICE}): {e}{Colors.ENDC}")
+        if ACTIVE_API_SERVICE == "Google AI (API Key)":
+             print(f"{Colors.WARNING}⚠️  ПРЕДУПРЕЖДЕНИЕ: Ошибка с API ключом. Попробую переключиться на Vertex AI...{Colors.ENDC}")
+             model = None
+             initialize_model()
         return None
 
 def _read_multiline_input(prompt):
@@ -343,25 +388,30 @@ def get_user_input():
 def main():
     """Основной рабочий цикл скрипта."""
     user_goal, error_log = get_user_input()
-    
+
     if not user_goal:
         raise ValueError("Цель не может быть пустой.")
-        
+
     initial_task = user_goal
     if error_log:
         initial_task += "\n\n--- ЛОГ ОШИБКИ ДЛЯ АНАЛИЗА ---\n" + error_log
-    
+
     project_context = get_project_context()
     if not project_context: raise ConnectionError("Не удалось получить первоначальный контекст проекта.")
-    
+
     current_prompt = get_initial_prompt(project_context, initial_task)
     attempt_history = []
 
     for iteration_count in range(1, MAX_ITERATIONS + 1):
-        print(f"\n{Colors.BOLD}{Colors.HEADER}🚀 --- АВТОМАТИЧЕСКАЯ ИТЕРАЦИЯ {iteration_count}/{MAX_ITERATIONS} ---{Colors.ENDC}")
-        
+        print(f"\n{Colors.BOLD}{Colors.HEADER}🚀 --- АВТОМАТИЧЕСКАЯ ИТЕРАЦИЯ {iteration_count}/{MAX_ITERATIONS} (API: {ACTIVE_API_SERVICE}) ---{Colors.ENDC}")
+
         answer = send_request_to_model(current_prompt, iteration_count)
-        if not answer: return "Ошибка: Не удалось получить ответ от модели."
+        if not answer:
+            if model:
+                print(f"{Colors.CYAN}🔄 ЛОГ: Ответ от модели не получен, пробую снова на той же итерации с новым API...{Colors.ENDC}")
+                continue
+            else:
+                return "Критическая ошибка: Не удалось получить ответ от модели и переключиться на запасной API."
 
         print(f"\n{Colors.OKGREEN}📦 ПОЛУЧЕН ОТВЕТ МОДЕЛИ:{Colors.ENDC}\n" + "="*20 + f"\n{answer}\n" + "="*20)
 
@@ -384,9 +434,9 @@ def main():
              print(f"{Colors.CYAN}💡 Стратегия ассистента: '{strategy_description}'{Colors.ENDC}")
 
         print(f"\n{Colors.OKBLUE}🔧 Найдены shell-команды для применения:{Colors.ENDC}\n" + "-"*20 + f"\n{commands_to_run}\n" + "-"*20)
-        
+
         success, failed_command, error_message = apply_shell_commands(commands_to_run)
-        
+
         project_context = get_project_context()
         if not project_context: return f"{Colors.FAIL}Критическая ошибка: не удалось обновить контекст.{Colors.ENDC}"
 
@@ -405,9 +455,9 @@ def main():
                 f"  **Ошибка (stderr):** {error_message}"
             )
             attempt_history.append(history_entry)
-            
+
             print(f"\n{Colors.FAIL}🆘 ЛОГ: Обнаружена ошибка. Готовлю промпт для исправления.{Colors.ENDC}")
-            
+
             filepath = extract_filepath_from_command(failed_command or "")
             error_context = f"--- КОНТЕКСТ ПРОЕКТА ---\n{project_context}\n--- КОНЕЦ КОНТЕКСТА ---"
             if filepath and os.path.exists(filepath) and not os.path.isdir(filepath):
@@ -420,18 +470,24 @@ def main():
             current_prompt = get_error_fixing_prompt(
                 failed_command=failed_command, error_message=error_message,
                 goal=user_goal, context=error_context, iteration_count=iteration_count + 1, attempt_history=attempt_history)
-            
+
     return f"{Colors.WARNING}⌛ Достигнут лимит в {MAX_ITERATIONS} итераций. Задача не была завершена.{Colors.ENDC}"
 
 if __name__ == "__main__":
+    initialize_model()
     final_status = "Работа завершена."
-    try: final_status = main()
-    except KeyboardInterrupt: final_status = f"{Colors.OKBLUE}🔵 Процесс прерван пользователем.{Colors.ENDC}"
+    try:
+        if model:
+            final_status = main()
+        else:
+            final_status = f"{Colors.FAIL}❌ Не удалось запустить основной цикл, так как модель не была инициализирована.{Colors.ENDC}"
+    except KeyboardInterrupt:
+        final_status = f"{Colors.OKBLUE}🔵 Процесс прерван пользователем.{Colors.ENDC}"
     except Exception as e:
         print(f"\n{Colors.FAIL}❌ КРИТИЧЕСКАЯ НЕПЕРЕХВАЧЕННАЯ ОШИБКА: {e}{Colors.ENDC}")
         final_status = f"{Colors.FAIL}❌ Скрипт аварийно завершился с ошибкой: {e}{Colors.ENDC}"
     finally:
         print(f"\n{final_status}")
         notify_user(final_status)
-        time.sleep(1) 
+        time.sleep(1)
         print(f"\n{Colors.BOLD}🏁 Скрипт завершил работу.{Colors.ENDC}")
