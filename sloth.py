@@ -12,23 +12,19 @@ import json
 
 # --- Класс для цветов в консоли (Палитра "Nordic Calm") ---
 class Colors:
-    # --- Основные цвета ---
     FAIL = '\033[38;2;191;97;106m'      # Красный (Aurora Red)
     OKGREEN = '\033[38;2;163;190;140m'   # Зеленый (Aurora Green)
     WARNING = '\033[38;2;235;203;139m'   # Желтый (Aurora Yellow)
     OKBLUE = '\033[38;2;94;129;172m'     # Голубой (Polar Night Blue)
     HEADER = '\033[38;2;180;142;173m'   # Пурпурный (Aurora Purple)
     CYAN = '\033[38;2;136;192;208m'     # Бирюзовый (Aurora Cyan)
-    
-    # --- Стили ---
     ENDC = '\033[0m'                    # Сброс
     BOLD = '\033[1m'
     UNDERLINE = '\033[4m'
-    
-    # --- Дополнительные оттенки для разнообразия (если понадобятся) ---
     GREY = '\033[38;2;106;114;128m'      # Серый для второстепенной информации
 
 # --- НАСТРОЙКИ ---
+# ИЗМЕНЕНО: Вставлен ваш новый API ключ.
 GOOGLE_API_KEY = "REDACTED_GOOGLE_API_KEY"
 
 GOOGLE_CLOUD_PROJECT = "useful-gearbox-464618-v3"
@@ -47,7 +43,6 @@ API_TIMEOUT_SECONDS = 600
 # --- Глобальные переменные для модели ---
 model = None
 ACTIVE_API_SERVICE = "N/A"
-# Флаг для запоминания отказа Google AI API В ТЕКУЩЕЙ СЕССИИ. Сбрасывается при каждом запуске.
 GOOGLE_AI_HAS_FAILED_THIS_SESSION = False
 
 def initialize_model():
@@ -64,9 +59,7 @@ def initialize_model():
         "temperature": 1, "top_p": 1, "top_k": 1, "max_output_tokens": 32768
     }
 
-    # Проверяем флаг. Если API ключ уже отказал в этой сессии, не пытаемся его использовать снова.
-    if not GOOGLE_AI_HAS_FAILED_THIS_SESSION and GOOGLE_API_KEY and "ВАШ_API_КЛЮЧ" not in GOOGLE_API_KEY:
-        # <<< ИЗМЕНЕНИЕ: Более явное логирование >>>
+    if not GOOGLE_AI_HAS_FAILED_THIS_SESSION and GOOGLE_API_KEY:
         print(f"{Colors.CYAN}🔑 ЛОГ: Пробую приоритетный сервис: Google AI (API Key)...{Colors.ENDC}")
         try:
             genai.configure(api_key=GOOGLE_API_KEY)
@@ -81,23 +74,22 @@ def initialize_model():
                 generation_config=generation_config,
                 safety_settings=genai_safety_settings
             )
-            # Короткий тестовый запрос для проверки работоспособности ключа
             model.generate_content("test", request_options={"timeout": 60})
             ACTIVE_API_SERVICE = "Google AI (API Key)"
             print(f"{Colors.OKGREEN}✅ ЛОГ: Успешно инициализировано через {ACTIVE_API_SERVICE}.{Colors.ENDC}")
             return
         except Exception as e:
             print(f"{Colors.WARNING}⚠️  ПРЕДУПРЕЖДЕНИЕ: Не удалось инициализировать через Google AI API Key: {e}{Colors.ENDC}")
-            print(f"{Colors.CYAN}🔄 ЛОГ: Переключаюсь на запасной вариант (Vertex AI) для этой сессии.{Colors.ENDC}")
-            GOOGLE_AI_HAS_FAILED_THIS_SESSION = True # Запоминаем отказ на время этой сессии
+            print(f"{Colors.CYAN}🔄 ЛОГ: Переключаюсь на запасной вариант (Vertex AI)...{Colors.ENDC}")
+            GOOGLE_AI_HAS_FAILED_THIS_SESSION = True
             model = None
-    elif GOOGLE_AI_HAS_FAILED_THIS_SESSION:
-        print(f"{Colors.CYAN}🔑 ЛОГ: Google AI API ранее отказал в этой сессии. Сразу использую Vertex AI.{Colors.ENDC}")
+
+    if GOOGLE_AI_HAS_FAILED_THIS_SESSION:
+         print(f"{Colors.CYAN}🔩 ЛОГ: Попытка инициализации через Vertex AI...{Colors.ENDC}")
     else:
-        print(f"{Colors.CYAN}🔑 ЛОГ: API ключ не указан. Использую Vertex AI.{Colors.ENDC}")
+         print(f"{Colors.CYAN}🔑 ЛОГ: API ключ не указан. Использую Vertex AI.{Colors.ENDC}")
 
     try:
-        print(f"{Colors.CYAN}🔩 ЛОГ: Попытка инициализации через Vertex AI...{Colors.ENDC}")
         vertexai.init(project=GOOGLE_CLOUD_PROJECT, location=GOOGLE_CLOUD_LOCATION)
         vertex_safety_settings = {
             HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
@@ -111,14 +103,120 @@ def initialize_model():
             safety_settings=vertex_safety_settings
         )
         ACTIVE_API_SERVICE = "Vertex AI"
-        print(f"{Colors.OKGREEN}✅ ЛОГ: Vertex AI SDK успешно инициализирован. Используется {ACTIVE_API_SERVICE}.{Colors.ENDC}")
+        print(f"{Colors.OKGREEN}✅ ЛОГ: Vertex AI SDK успешно инициализирован.{Colors.ENDC}")
     except Exception as e:
-        print(f"{Colors.FAIL}❌ ЛОГ: КРИТИЧЕСКАЯ ОШИБКА: Не удалось инициализировать модель ни одним из способов.{Colors.ENDC}")
-        print(f"{Colors.FAIL}   - Ошибка Vertex AI: {e}{Colors.ENDC}")
+        print(f"{Colors.FAIL}❌ ЛОГ: КРИТИЧЕСКАЯ ОШИБКА: Не удалось инициализировать модель ни одним из способов: {e}{Colors.ENDC}")
         sys.exit(1)
 
 
-# --- БЛОК ПРОМПТ-ШАБЛОНОВ ---
+def send_request_to_model(prompt_text, iteration_count):
+    """
+    ИСПРАВЛЕНО: Отправляет запрос, обрабатывая различия между API.
+    """
+    global model, GOOGLE_AI_HAS_FAILED_THIS_SESSION
+    try:
+        print(f"{Colors.CYAN}🧠 ЛОГ: [Итерация {iteration_count}] Готовлю запрос в модель ({ACTIVE_API_SERVICE}).{Colors.ENDC}")
+        save_prompt_for_debugging(prompt_text)
+        print(f"{Colors.CYAN}⏳ ЛОГ: Отправляю запрос... (таймаут: {API_TIMEOUT_SECONDS} сек){Colors.ENDC}")
+        
+        response = None
+        if ACTIVE_API_SERVICE == "Google AI (API Key)":
+            request_options = {"timeout": API_TIMEOUT_SECONDS}
+            response = model.generate_content(prompt_text, request_options=request_options)
+        elif ACTIVE_API_SERVICE == "Vertex AI":
+            response = model.generate_content(prompt_text)
+        else:
+            raise ValueError(f"Попытка вызова неизвестного сервиса API: {ACTIVE_API_SERVICE}")
+
+        if not response:
+            raise ValueError("Ответ от модели пустой.")
+
+        print(f"{Colors.OKGREEN}✅ ЛОГ: Ответ от модели получен успешно.{Colors.ENDC}")
+        return response.text
+        
+    except Exception as e:
+        print(f"{Colors.FAIL}❌ ЛОГ: ОШИБКА при запросе к API ({ACTIVE_API_SERVICE}): {e}{Colors.ENDC}")
+        error_str = str(e).lower()
+        if ACTIVE_API_SERVICE == "Google AI (API Key)" and ("quota" in error_str or "rate limit" in error_str):
+            print(f"{Colors.FAIL}🚨 ЛОГ: ОБНАРУЖЕНА ОШИБКА КВОТЫ!{Colors.ENDC}")
+            print(f"{Colors.CYAN}   - Перманентно (на эту сессию) переключаюсь на Vertex AI...{Colors.ENDC}")
+            GOOGLE_AI_HAS_FAILED_THIS_SESSION = True
+            model = None
+            initialize_model()
+        return None
+
+
+def main(is_fix_mode=False):
+    """
+    ИСПРАВЛЕНО: Основной рабочий цикл с корректным подсчетом итераций.
+    """
+    user_goal, error_log = get_user_input()
+    if not user_goal:
+        print(f"{Colors.WARNING}Цель не была указана. Завершение работы.{Colors.ENDC}")
+        return "Цель не была указана."
+    
+    initial_task = user_goal + (f"\n\n--- ЛОГ ОШИБКИ ---\n{error_log}" if error_log else "")
+    project_context = get_project_context()
+    if not project_context:
+        return f"{Colors.FAIL}КРИТИЧЕСКАЯ ОШИБКА: Не удалось получить контекст проекта.{Colors.ENDC}"
+    
+    current_prompt = get_initial_prompt(project_context, initial_task, load_fix_history() if is_fix_mode else None)
+    attempt_history = []
+    
+    iteration_count = 1
+    while iteration_count <= MAX_ITERATIONS:
+        print(f"\n{Colors.BOLD}{Colors.HEADER}🚀 --- АВТОМАТИЧЕСКАЯ ИТЕРАЦИЯ {iteration_count}/{MAX_ITERATIONS} (API: {ACTIVE_API_SERVICE}) ---{Colors.ENDC}")
+
+        answer = send_request_to_model(current_prompt, iteration_count)
+        if not answer:
+            if model:
+                print(f"{Colors.WARNING}🔄 ЛОГ: Ответ от модели не получен, пробую снова...{Colors.ENDC}")
+                print(f"{Colors.WARNING}⏸️  ЛОГ: Пауза на 5 секунд перед повторной попыткой...{Colors.ENDC}")
+                time.sleep(5)
+                continue
+            else:
+                return "Критическая ошибка: Не удалось получить ответ и нет запасного API."
+        
+        if answer.strip().upper().startswith("ГОТОВО"):
+            done_summary = extract_done_summary_block(answer)
+            manual_steps = extract_manual_steps_block(answer)
+            final_message = f"{Colors.OKGREEN}✅ Задача выполнена успешно! (за {iteration_count} итераций){Colors.ENDC}"
+            if done_summary:
+                save_completion_history(user_goal, done_summary)
+                print(f"{Colors.OKGREEN}📄 ИТОГОВОЕ РЕЗЮМЕ:\n{Colors.CYAN}{done_summary}{Colors.ENDC}")
+            if manual_steps:
+                 final_message += f"\n\n{Colors.WARNING}✋ ТРЕБУЮТСЯ РУЧНЫЕ ДЕЙСТВИЯ:{Colors.ENDC}\n{manual_steps}"
+            return final_message
+
+        commands_to_run = extract_todo_block(answer)
+        if not commands_to_run:
+            print(f"{Colors.FAIL}❌ ЛОГ: Модель вернула ответ без команд. Пробую на следующей итерации.{Colors.ENDC}")
+            current_prompt = get_review_prompt(project_context, user_goal, iteration_count + 1, attempt_history)
+            iteration_count += 1
+            continue
+
+        strategy_description = extract_summary_block(answer) or "Стратегия не описана."
+        print(f"\n{Colors.OKBLUE}🔧 Найдены shell-команды для применения:{Colors.ENDC}\n" + "-"*20 + f"\n{commands_to_run}\n" + "-"*20)
+
+        success, failed_command, error_message = apply_shell_commands(commands_to_run)
+        project_context = get_project_context()
+        if not project_context: return f"{Colors.FAIL}Критическая ошибка: не удалось обновить контекст.{Colors.ENDC}"
+
+        history_entry = f"**Итерация {iteration_count}:**\n**Стратегия:** {strategy_description}\n"
+        if success:
+            history_entry += "**Результат:** УСПЕХ"
+            current_prompt = get_review_prompt(project_context, user_goal, iteration_count + 1, attempt_history)
+        else:
+            history_entry += f"**Результат:** ПРОВАЛ\n**Ошибка:** {error_message}"
+            current_prompt = get_error_fixing_prompt(failed_command, error_message, user_goal, project_context, iteration_count + 1, attempt_history)
+        
+        attempt_history.append(history_entry)
+        iteration_count += 1
+
+    return f"{Colors.WARNING}⌛ Достигнут лимит в {MAX_ITERATIONS} итераций. Задача не была завершена.{Colors.ENDC}"
+
+
+# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (ПОЛНЫЕ ВЕРСИИ) ---
 
 def get_command_rules():
     return f"""
@@ -177,7 +275,7 @@ def get_review_prompt(context, goal, iteration_count, attempt_history):
         history_info = (
             "--- ИСТОРИЯ ПРЕДЫДУЩИХ ПОПЫТОК ---\n"
             "Вот что ты уже сделал. Проанализируй всю историю (и успехи, и неудачи), чтобы выработать следующий шаг.\n\n"
-            + "\n---\n".join(f"**На итерации {i+1}:**\n{s}" for i, s in enumerate(attempt_history)) +
+            + "\n---\n".join(attempt_history) +
             "\n\n--- КОНЕЦ ИСТОРИИ ---\n"
         )
     return f"""{get_command_rules()}
@@ -209,7 +307,7 @@ def get_error_fixing_prompt(failed_command, error_message, goal, context, iterat
         history_info = (
             "--- ИСТОРИЯ ПРЕДЫДУЩИХ ПОПЫТОК ---\n"
             "Вот что ты уже сделал. Проанализируй всю историю (и успехи, и неудачи), чтобы понять, почему текущая команда провалилась.\n\n"
-            + "\n---\n".join(f"**На итерации {i+1}:**\n{s}" for i, s in enumerate(attempt_history)) +
+            + "\n---\n".join(attempt_history) +
             "\n--- КОНЕЦ ИСТОРИИ ---\n"
         )
 
@@ -231,23 +329,6 @@ def get_error_fixing_prompt(failed_command, error_message, goal, context, iterat
 {context}
 --- КОНЕЦ КОНТЕКСТА ---
 """
-
-
-# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
-def notify_user(message):
-    print(f"{Colors.OKBLUE}📢 ЛОГ: Отправляю уведомление: {message.replace(Colors.ENDC, '')}{Colors.ENDC}")
-    system = platform.system()
-    try:
-        if system == "Darwin":
-            subprocess.run(['afplay', '/System/Library/Sounds/Sosumi.aiff'], check=True, timeout=5)
-        elif system == "Linux":
-            subprocess.run(['zenity', '--info', '--text', message, '--title', 'Sloth Script', '--timeout=10', '--window-icon=info'], check=True, timeout=10)
-            subprocess.run(['aplay', '/usr/share/sounds/alsa/Front_Center.wav'], check=True)
-        elif system == "Windows":
-            command = f'powershell -Command "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.MessageBox]::Show(\'{message}\', \'Sloth Script\');"'
-            subprocess.run(command, shell=True, check=True, timeout=30)
-    except Exception as e:
-        print(f"{Colors.WARNING}⚠️  ПРЕДУПРЕЖДЕНИЕ: Не удалось отправить системное уведомление. Ошибка: {e}.{Colors.ENDC}")
 
 def get_project_context():
     print(f"{Colors.CYAN}🔄 ЛОГ: Обновляю контекст проекта...{Colors.ENDC}")
@@ -356,55 +437,6 @@ def save_prompt_for_debugging(prompt_text):
     except Exception as e:
         print(f"{Colors.WARNING}   - ВНИМАНИЕ: Не удалось сохранить отладочный файл промпта: {e}{Colors.ENDC}")
 
-def send_request_to_model(prompt_text, iteration_count):
-    global model, GOOGLE_AI_HAS_FAILED_THIS_SESSION
-    try:
-        prompt_size = len(prompt_text)
-        print(f"{Colors.CYAN}🧠 ЛОГ: [Итерация {iteration_count}] Готовлю запрос в модель ({ACTIVE_API_SERVICE}).{Colors.ENDC}")
-        print(f"{Colors.OKBLUE}   - Общий размер промпта: {prompt_size} символов.{Colors.ENDC}")
-        save_prompt_for_debugging(prompt_text)
-
-        if prompt_size > 100000:
-             print(f"{Colors.WARNING}   - ВНИМАНИЕ: Размер промпта очень большой. Ответ может занять несколько минут.{Colors.ENDC}")
-
-        request_options = {"timeout": API_TIMEOUT_SECONDS}
-        print(f"{Colors.CYAN}⏳ ЛОГ: Отправляю запрос и ожидаю ответ... (таймаут: {API_TIMEOUT_SECONDS} секунд){Colors.ENDC}")
-        response = model.generate_content(prompt_text, request_options=request_options)
-        
-        if response.prompt_feedback and response.prompt_feedback.block_reason:
-            reason_name = response.prompt_feedback.block_reason.name
-            print(f"{Colors.FAIL}❌ ЛОГ: ЗАПРОС БЫЛ ЗАБЛОКИРОВАН API.{Colors.ENDC}")
-            print(f"{Colors.FAIL}   - Причина блокировки: {reason_name}{Colors.ENDC}")
-            print(f"{Colors.FAIL}   - Рейтинги безопасности: {response.prompt_feedback.safety_ratings}{Colors.ENDC}")
-            raise ValueError(f"Промпт заблокирован из-за настроек безопасности. Причина: {reason_name}")
-
-        if not response.candidates or response.candidates[0].finish_reason.name != "STOP":
-            reason = response.candidates[0].finish_reason.name if response.candidates else "Кандидат не сгенерирован"
-            safety_ratings = response.candidates[0].safety_ratings if response.candidates else "Нет данных"
-            print(f"{Colors.FAIL}❌ ЛОГ: Ответ от модели был прерван или неполный.{Colors.ENDC}")
-            print(f"{Colors.FAIL}   - Причина завершения: {reason}{Colors.ENDC}")
-            print(f"{Colors.FAIL}   - Рейтинги безопасности ответа: {safety_ratings}{Colors.ENDC}")
-            raise ValueError(f"Ответ от модели был прерван. Причина: {reason}")
-        
-        print(f"{Colors.OKGREEN}✅ ЛОГ: Ответ от модели получен успешно.{Colors.ENDC}")
-        return response.text
-        
-    except Exception as e:
-        print(f"{Colors.FAIL}❌ ЛОГ: ОШИБКА при запросе к API ({ACTIVE_API_SERVICE}): {e}{Colors.ENDC}")
-        
-        error_str = str(e).lower()
-        is_quota_error = "quota" in error_str or "rate limit" in error_str or "exceeded" in error_str
-
-        if ACTIVE_API_SERVICE == "Google AI (API Key)" and is_quota_error:
-            print(f"{Colors.FAIL}🚨 ЛОГ: ОБНАРУЖЕНА ОШИБКА КВОТЫ В GOOGLE AI API!{Colors.ENDC}")
-            print(f"{Colors.CYAN}   - Устанавливаю флаг отказа и перманентно (на эту сессию) переключаюсь на Vertex AI...{Colors.ENDC}")
-            GOOGLE_AI_HAS_FAILED_THIS_SESSION = True
-            model = None
-            initialize_model()
-        
-        print(f"{Colors.CYAN}   - Проверьте файл 'sloth_debug_prompt.txt', чтобы увидеть точный промпт, вызвавший ошибку.{Colors.ENDC}")
-        return None
-
 def _read_multiline_input(prompt):
     print(prompt)
     lines = []
@@ -483,119 +515,20 @@ def load_fix_history():
         print(f"{Colors.FAIL}❌ ЛОГ: Не удалось загрузить или прочитать файл истории {HISTORY_FILE}: {e}{Colors.ENDC}")
         return None
 
+def notify_user(message):
+    print(f"{Colors.OKBLUE}📢 ЛОГ: Отправляю уведомление: {message.replace(Colors.ENDC, '')}{Colors.ENDC}")
+    system = platform.system()
+    try:
+        if system == "Darwin":
+            subprocess.run(['afplay', '/System/Library/Sounds/Sosumi.aiff'], check=True, timeout=5)
+        elif system == "Linux":
+            subprocess.run(['zenity', '--info', '--text', message, '--title', 'Sloth Script', '--timeout=10', '--window-icon=info'], check=True, timeout=10)
+        elif system == "Windows":
+            command = f'powershell -Command "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.MessageBox]::Show(\'{message}\', \'Sloth Script\');"'
+            subprocess.run(command, shell=True, check=True, timeout=30)
+    except Exception as e:
+        print(f"{Colors.WARNING}⚠️  ПРЕДУПРЕЖДЕНИЕ: Не удалось отправить системное уведомление. Ошибка: {e}.{Colors.ENDC}")
 
-# --- ГЛАВНЫЙ ЦИКЛ ---
-def main(is_fix_mode=False):
-    """Основной рабочий цикл скрипта."""
-    if is_fix_mode:
-        print(f"{Colors.WARNING}🔧 ЛОГ: Запуск в режиме исправления (--fix).{Colors.ENDC}")
-
-    user_goal, error_log = get_user_input()
-
-    if not user_goal:
-        raise ValueError("Цель не может быть пустой.")
-
-    initial_task = user_goal
-    if error_log:
-        initial_task += "\n\n--- ЛОГ ОШИБКИ ДЛЯ АНАЛИЗА ---\n" + error_log
-
-    project_context = get_project_context()
-    if not project_context: raise ConnectionError("Не удалось получить первоначальный контекст проекта.")
-    
-    fix_history_content = None
-    if is_fix_mode:
-        fix_history_content = load_fix_history()
-        if fix_history_content:
-            print(f"{Colors.CYAN} historial ЛОГ: Загружена история последнего неудачного решения.{Colors.ENDC}")
-
-    current_prompt = get_initial_prompt(project_context, initial_task, fix_history=fix_history_content)
-    attempt_history = []
-
-    for iteration_count in range(1, MAX_ITERATIONS + 1):
-        print(f"\n{Colors.BOLD}{Colors.HEADER}🚀 --- АВТОМАТИЧЕСКАЯ ИТЕРАЦИЯ {iteration_count}/{MAX_ITERATIONS} (API: {ACTIVE_API_SERVICE}) ---{Colors.ENDC}")
-
-        answer = send_request_to_model(current_prompt, iteration_count)
-        if not answer:
-            if model:
-                print(f"{Colors.CYAN}🔄 ЛОГ: Ответ от модели не получен, пробую снова на той же итерации с новым API...{Colors.ENDC}")
-                continue
-            else:
-                return "Критическая ошибка: Не удалось получить ответ от модели и переключиться на запасной API."
-        
-        if answer.strip().upper().startswith("ГОТОВО"):
-            done_summary = extract_done_summary_block(answer)
-            manual_steps = extract_manual_steps_block(answer)
-
-            if not done_summary:
-                print(f"{Colors.WARNING}⚠️ ПРЕДУПРЕЖДЕНИЕ: Модель сообщила 'ГОТОВО', но не предоставила блок `done_summary`. История не будет сохранена.{Colors.ENDC}")
-                done_summary = "Модель не предоставила итоговое резюме."
-            else:
-                print(f"{Colors.OKGREEN}📄 ИТОГОВОЕ РЕЗЮМЕ ОТ МОДЕЛИ:\n{Colors.CYAN}{done_summary}{Colors.ENDC}")
-                if is_fix_mode and os.path.exists(HISTORY_FILE):
-                    os.remove(HISTORY_FILE)
-                    print(f"{Colors.CYAN}🗑️  ЛОГ: Задача решена в режиме --fix. Старая история ({HISTORY_FILE}) очищена.{Colors.ENDC}")
-                save_completion_history(user_goal, done_summary)
-
-
-            final_message = f"{Colors.OKGREEN}✅ Задача выполнена успешно! (за {iteration_count} итераций){Colors.ENDC}"
-            if manual_steps:
-                final_message += f"\n\n{Colors.WARNING}✋ ВАЖНО: Требуются следующие ручные действия:{Colors.ENDC}\n" + "-"*20 + f"\n{manual_steps}\n" + "-"*20
-            return final_message
-
-        commands_to_run = extract_todo_block(answer)
-        if not commands_to_run:
-            print(f"{Colors.FAIL}❌ ЛОГ: Модель вернула ответ без команд и без статуса 'ГОТОВО'. Ответ модели:\n{answer}{Colors.ENDC}")
-            with open("sloth_debug_bad_response.txt", "w", encoding='utf-8') as f:
-                f.write(answer)
-            return f"{Colors.FAIL}Модель не предоставила блок команд и не считает задачу выполненной. Ответ сохранен в sloth_debug_bad_response.txt{Colors.ENDC}"
-
-
-        strategy_description = extract_summary_block(answer)
-        if not strategy_description:
-            strategy_description = f"Применена команда, начинающаяся с `{commands_to_run.splitlines()[0][:80]}...` (описание не предоставлено)"
-            print(f"{Colors.WARNING}⚠️  ПРЕДУПРЕЖДЕНИЕ: Модель не предоставила блок summary. Используется авто-описание.{Colors.ENDC}")
-        else:
-             print(f"{Colors.CYAN}💡 Стратегия ассистента: '{strategy_description}'{Colors.ENDC}")
-
-        print(f"\n{Colors.OKBLUE}🔧 Найдены shell-команды для применения:{Colors.ENDC}\n" + "-"*20 + f"\n{commands_to_run}\n" + "-"*20)
-
-        success, failed_command, error_message = apply_shell_commands(commands_to_run)
-
-        project_context = get_project_context()
-        if not project_context: return f"{Colors.FAIL}Критическая ошибка: не удалось обновить контекст.{Colors.ENDC}"
-
-        if success:
-            history_entry = (
-                f"**Стратегия:** {strategy_description}\n"
-                f"  **Результат:** УСПЕХ"
-            )
-            attempt_history.append(history_entry)
-            print(f"\n{Colors.CYAN}🧐 ЛОГ: Команды успешно применены. Готовлюсь к верификации.{Colors.ENDC}")
-            current_prompt = get_review_prompt(project_context, user_goal, iteration_count + 1, attempt_history)
-        else:
-            history_entry = (
-                f"**Стратегия:** {strategy_description}\n"
-                f"  **Результат:** ПРОВАЛ\n"
-                f"  **Ошибка (stderr):** {error_message}"
-            )
-            attempt_history.append(history_entry)
-
-            print(f"\n{Colors.FAIL}🆘 ЛОГ: Обнаружена ошибка. Готовлю промпт для исправления.{Colors.ENDC}")
-
-            filepath = extract_filepath_from_command(failed_command or "")
-            error_context = f"--- КОНТЕКСТ ПРОЕКТА ---\n{project_context}\n--- КОНЕЦ КОНТЕКСТА ---"
-            if filepath and os.path.exists(filepath) and not os.path.isdir(filepath):
-                try:
-                    with open(filepath, 'r', encoding='utf-8') as f: file_content = f.read()
-                    error_context = f"--- СОДЕРЖИМОЕ ФАЙЛА: {filepath} ---\n{file_content}\n--- КОНЕЦ СОДЕРЖИМОГО ФАЙЛА ---\n\n{error_context}"
-                except Exception as e:
-                    print(f"{Colors.WARNING}⚠️  ПРЕДУПРЕЖДЕНИЕ: Не удалось прочитать файл '{filepath}' для контекста ошибки: {e}{Colors.ENDC}")
-
-            current_prompt = get_error_fixing_prompt(
-                failed_command=failed_command, error_message=error_message,
-                goal=user_goal, context=error_context, iteration_count=iteration_count + 1, attempt_history=attempt_history)
-
-    return f"{Colors.WARNING}⌛ Достигнут лимит в {MAX_ITERATIONS} итераций. Задача не была завершена.{Colors.ENDC}"
 
 if __name__ == "__main__":
     is_fix_mode = '--fix' in sys.argv or '-fix' in sys.argv
@@ -611,7 +544,6 @@ if __name__ == "__main__":
         os.remove("sloth_debug_prompt.txt")
     if os.path.exists("sloth_debug_bad_response.txt"):
         os.remove("sloth_debug_bad_response.txt")
-
 
     initialize_model()
     final_status = "Работа завершена."
