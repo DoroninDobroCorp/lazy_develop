@@ -9,41 +9,48 @@ import subprocess
 from colors import Colors
 import sloth_core
 import sloth_runner
+import context_collector
 
 # --- КОНСТАНТЫ ИНТЕРФЕЙСА ---
 MAX_ITERATIONS = 15
-CONTEXT_SCRIPT = 'AskGpt.py'
+CONTEXT_SCRIPT = 'AskGpt.py' # Оставим для обратной совместимости, если context_collector не сработает
 CONTEXT_FILE = 'message_1.txt'
 HISTORY_FILE = 'sloth_history.json'
 
-# --- НОВОЕ: Функция для расчета стоимости ---
 def calculate_cost(model_name, input_tokens, output_tokens):
-    """Рассчитывает стоимость одного вызова API."""
-    pricing = sloth_core.MODEL_PRICING.get(model_name)
-    if not pricing:
+    """
+    Рассчитывает стоимость одного вызова API, учитывая многоуровневую тарификацию.
+    """
+    pricing_info = sloth_core.MODEL_PRICING.get(model_name)
+    if not pricing_info:
         return 0.0
 
-    cost = ((pricing["input"] / 1_000_000) * input_tokens) + \
-           ((pricing["output"] / 1_000_000) * output_tokens)
-    return cost
+    total_cost = 0.0
+    
+    # Расчет стоимости для входных токенов
+    input_tiers = pricing_info.get("input", {}).get("tiers", [])
+    for tier in input_tiers:
+        if input_tokens <= tier["up_to"]:
+            total_cost += (tier["price"] / 1_000_000) * input_tokens
+            break
+
+    # Расчет стоимости для выходных токенов (цена зависит от размера ВХОДА)
+    output_tiers = pricing_info.get("output", {}).get("tiers", [])
+    for tier in output_tiers:
+        if input_tokens <= tier["up_to"]: 
+            total_cost += (tier["price"] / 1_000_000) * output_tokens
+            break
+            
+    return total_cost
 
 # --- УТИЛИТЫ ИНТЕРФЕЙСА ---
 
 def get_project_context():
-    """Собирает и возвращает контекст проекта."""
+    """Собирает и возвращает контекст проекта, используя новый модуль."""
     print(f"{Colors.CYAN}🔄 ЛОГ: Обновляю контекст проекта...{Colors.ENDC}")
     try:
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        script_to_run_path = os.path.join(script_dir, CONTEXT_SCRIPT)
-        context_file_path = os.path.join(script_dir, CONTEXT_FILE)
-
-        if os.path.exists(context_file_path): os.remove(context_file_path)
-
-        subprocess.run(['python3', script_to_run_path], check=True, capture_output=True, text=True, encoding='utf-8')
-
-        with open(context_file_path, 'r', encoding='utf-8') as f:
-            context_data = f.read()
-
+        # Используем новый, чистый способ
+        context_data = context_collector.gather_project_context(os.getcwd())
         print(f"{Colors.OKGREEN}✅ ЛОГ: Контекст успешно обновлен. Размер: {len(context_data)} символов.{Colors.ENDC}")
         return context_data
     except Exception as e:
@@ -189,10 +196,11 @@ def main(is_fix_mode=False):
     
     current_prompt = sloth_core.get_initial_prompt(project_context, initial_task, load_fix_history() if is_fix_mode else None)
     attempt_history = []
+    final_message = ""
     
     iteration_count = 1
     while iteration_count <= MAX_ITERATIONS:
-        model_instance, active_service = sloth_core.get_active_service_details() # Обновляем на случай переключения API
+        model_instance, active_service = sloth_core.get_active_service_details()
         print(f"\n{Colors.BOLD}{Colors.HEADER}🚀 --- ЭТАП: {current_phase} | ИТЕРАЦИЯ {iteration_count}/{MAX_ITERATIONS} (API: {active_service}) ---{Colors.ENDC}")
 
         answer_data = sloth_core.send_request_to_model(model_instance, active_service, current_prompt, iteration_count)
@@ -203,16 +211,19 @@ def main(is_fix_mode=False):
                 time.sleep(5)
                 continue
             else:
-                return "Критическая ошибка: Не удалось получить ответ и нет запасного API."
+                final_message = "Критическая ошибка: Не удалось получить ответ и нет запасного API."
+                break
         
         iteration_cost = calculate_cost(sloth_core.MODEL_NAME, answer_data["input_tokens"], answer_data["output_tokens"])
         total_cost += iteration_cost
-        if is_fix_mode:
-            fix_phase_cost += iteration_cost
-        else:
-            initial_phase_cost += iteration_cost
-        cost_log.append({"phase": current_phase, "iteration": iteration_count, "model": sloth_core.MODEL_NAME, "cost": iteration_cost})
-        print(f"{Colors.GREY}📊 Статистика итерации: Вход: {answer_data['input_tokens']} токенов, Выход: {answer_data['output_tokens']} токенов. Стоимость: ~${iteration_cost:.6f}{Colors.ENDC}")
+        if current_phase == "Fix": fix_phase_cost += iteration_cost
+        else: initial_phase_cost += iteration_cost
+        
+        cost_log.append({
+            "phase": current_phase, "iteration": iteration_count, "model": sloth_core.MODEL_NAME, 
+            "cost": iteration_cost, "input": answer_data["input_tokens"], "output": answer_data["output_tokens"]
+        })
+        print(f"{Colors.GREY}📊 Статистика: Вход: {answer_data['input_tokens']} т., Выход: {answer_data['output_tokens']} т. Стоимость: ~${iteration_cost:.6f}{Colors.ENDC}")
         
         answer_text = answer_data["text"]
 
@@ -240,7 +251,9 @@ def main(is_fix_mode=False):
         success, failed_command, error_message = sloth_runner.execute_commands(commands_to_run)
         
         project_context = get_project_context()
-        if not project_context: return f"{Colors.FAIL}Критическая ошибка: не удалось обновить контекст.{Colors.ENDC}"
+        if not project_context: 
+            final_message = f"{Colors.FAIL}Критическая ошибка: не удалось обновить контекст.{Colors.ENDC}"
+            break
 
         history_entry = f"**Итерация {iteration_count}:**\n**Стратегия:** {strategy_description}\n"
         if success:
@@ -253,25 +266,30 @@ def main(is_fix_mode=False):
         attempt_history.append(history_entry)
         iteration_count += 1
     
-    final_message = f"{Colors.WARNING}⌛ Достигнут лимит в {MAX_ITERATIONS} итераций. Задача не была завершена.{Colors.ENDC}"
+    if not final_message:
+        final_message = f"{Colors.WARNING}⌛ Достигнут лимит в {MAX_ITERATIONS} итераций. Задача не была завершена.{Colors.ENDC}"
     
     print(f"\n{Colors.BOLD}{Colors.HEADER}--- ИТОГОВЫЙ ОТЧЕТ ПО СТОИМОСТИ ---{Colors.ENDC}")
     for entry in cost_log:
-        print(f"  Фаза: {entry['phase']}, Итерация: {entry['iteration']}, Модель: {entry['model']}, Стоимость: ${entry['cost']:.6f}")
+        print(f"  Фаза: {entry['phase']:<8} | Итерация: {entry['iteration']:<2} | Модель: {entry['model']:<20} | Стоимость: ${entry['cost']:.6f}")
+    
     if fix_phase_cost > 0:
         print(f"\n  Стоимость начального этапа: ${initial_phase_cost:.6f}")
         print(f"  Стоимость этапа исправлений: ${fix_phase_cost:.6f}")
+    
     print(f"{Colors.BOLD}\n  Общая стоимость задачи: ${total_cost:.6f}{Colors.ENDC}")
 
     return final_message
-
 
 if __name__ == "__main__":
     is_fix_mode = '--fix' in sys.argv
     
     if not is_fix_mode and os.path.exists(HISTORY_FILE):
-        try: os.remove(HISTORY_FILE)
-        except: pass
+        try: 
+            os.remove(HISTORY_FILE)
+            print(f"{Colors.CYAN}🗑️  ЛОГ: Очищена старая история ({HISTORY_FILE}).{Colors.ENDC}")
+        except Exception as e:
+            print(f"{Colors.WARNING}⚠️  ПРЕДУПРЕЖДЕНИЕ: Не удалось удалить файл истории: {e}{Colors.ENDC}")
     
     final_status = "Работа завершена."
     try:
