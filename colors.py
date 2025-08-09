@@ -6,7 +6,7 @@ class Colors:
     WARNING = '\033[38;2;235;203;139m'   # Желтый (Aurora Yellow)
     OKBLUE = '\033[38;2;94;129;172m'     # Голубой (Polar Night Blue)
     HEADER = '\033[38;2;180;142;173m'   # Пурпурный (Aurora Purple)
-    CYAN = '\033[38;2;136;192;208m'     # Бирюзовый (Aurora Cyan)
+    CYAN = '\033[38;2;235;203;139m'     # Бирюзовый (Aurora Cyan)
     ENDC = '\033[0m'                    # Сброс
     BOLD = '\033[1m'
     UNDERLINE = '\033[4m'
