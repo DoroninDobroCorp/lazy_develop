@@ -5,7 +5,7 @@ import re
 # --- КОНФИГУРАЦИЯ СБОРА КОНТЕКСТА ---
 IGNORE_EXTENSIONS = {".png", ".jpeg", ".jpg", ".gif", ".bmp", ".ico", ".svg", ".webp"}
 IGNORE_FILES = {
-    "go.mod", "go.sum", "package.json", "package-lock.json", "yarn.lock",
+    "go.mod", "go.sum", "package-lock.json", "yarn.lock",
     ".ds_store", ".gitignore", "readme.md", "analyzer_wide", "tsconfig.tsbuildinfo",
     "sloth_debug_prompt.txt", "sloth_debug_bad_response.txt"
 }

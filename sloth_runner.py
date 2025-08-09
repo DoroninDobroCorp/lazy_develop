@@ -17,6 +17,15 @@ def get_file_hash(filepath):
             h.update(chunk)
     return h.hexdigest()
 
+def _adapt_commands_for_project_root(s: str) -> str:
+    cwd = os.getcwd(); root = os.path.basename(cwd.rstrip(os.sep))
+    root_posix = cwd.replace("\\","/").rstrip("/")
+    s = re.sub(r'^' + re.escape(root + "/"), '', s, flags=re.MULTILINE)
+    s = re.sub(r'([ \t\'"])' + re.escape(root + "/"), r'\1', s)
+    s = re.sub(r'^' + re.escape(root_posix + "/"), '', s, flags=re.MULTILINE)
+    s = re.sub(r'([ \t\'"])' + re.escape(root_posix + "/"), r'\1', s)
+    return s
+
 def execute_commands(commands_str):
     """
     Выполняет блок shell-команд.
@@ -34,8 +43,10 @@ def execute_commands(commands_str):
     
     try:
         is_macos = platform.system() == "Darwin"
+        # Чистим возможные префиксы корня проекта в путях
+        commands_str_fixed = _adapt_commands_for_project_root(commands_str)
         # Для macOS добавляем флаг .bak для sed -i, чтобы он работал как в Linux
-        commands_str_adapted = re.sub(r"sed -i ", "sed -i '.bak' ", commands_str) if is_macos else commands_str
+        commands_str_adapted = re.sub(r"sed -i ", "sed -i '.bak' ", commands_str_fixed) if is_macos else commands_str_fixed
         full_command = f"set -e\n{commands_str_adapted}"
 
         print(f"{Colors.WARNING}⚡️ ЛОГ: Выполняю блок команд (bash, set -e)...{Colors.ENDC}")
