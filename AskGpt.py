@@ -26,7 +26,7 @@ USER_IGNORE_FILES = (
     # Common
     ".DS_Store, .gitignore, README.md, "
     # Specific user files
-    "analyzer_wide, tsconfig.tsbuildinfo, chat_sender.py, chat_sender_g.py, sloth.py, sloth_debug_prompt.txt, sloth_debug_bad_response.txt"
+    "analyzer_wide, tsconfig.tsbuildinfo, sloth_debug_prompt.txt, sloth_debug_bad_response.txt"
 )
 
 # Список папок для игнорирования (через запятую).
