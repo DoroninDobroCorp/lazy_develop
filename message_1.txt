@@ -1,0 +1,4530 @@
+сейчас я выгружу тебя сначала дерево файлов с размерами в символах, а потом все файлы, которые не были проигнорированы. Возможно это займет больше одного сообщения, тогда просто скажи ОК. После того как все будет загружено, я задам вопросы, чтобы ты был в контексте кода.
+
+--- Структура проекта (с размерами в символах) ---
+
+[DIR] lazy_develop/ (155899 chars)
+  [FILE] colors.py (6743 chars)
+  [FILE] context_collector.py (6395 chars)
+  !!![FILE] sloth_cli.py (24358 chars)
+  !!![FILE] sloth_core.py (20500 chars)
+  [FILE] sloth_history.json (637 chars)
+  !!![FILE] sloth_run.log (92510 chars)
+  [FILE] sloth_runner.py (4756 chars)
+
+--- Содержимое файлов ---
+
+
+Файл: colors.py
+---------------
+"""
+Файл: colors.py
+
+Адаптивная цветовая схема для консоли с поддержкой светлых и темных тем.
+
+Как управлять темой:
+- SLOTH_THEME=dark | light | mono (по умолчанию: auto→light)
+- NO_COLOR (любое значение) — полностью отключает цвета
+
+Палитры подобраны в мягком пастельном стиле с учетом читаемости на светлом и темном фоне.
+"""
+
+import os
+import sys
+import locale
+
+
+def _rgb(r: int, g: int, b: int) -> str:
+    return f"\033[38;2;{r};{g};{b}m"
+
+
+def _supports_truecolor() -> bool:
+    """Определяет поддержку 24-битного цвета терминалом.
+
+    Надежный индикатор — переменная COLORTERM=truecolor|24bit.
+    На macOS некоторые терминалы не указывают это явно, поэтому
+    допускаем ручной оверрайд через SLOTH_COLOR_DEPTH=24.
+    """
+    ct = (os.getenv("COLORTERM") or "").lower()
+    if "truecolor" in ct or "24bit" in ct:
+        return True
+    if (os.getenv("SLOTH_COLOR_DEPTH") or "").strip() == "24":
+        return True
+    return False
+
+
+def _supports_256color() -> bool:
+    """Проверяет поддержку 256-цветной палитры.
+
+    Ориентируемся на TERM, а также допускаем ручной оверрайд SLOTH_COLOR_DEPTH=256.
+    """
+    if (os.getenv("SLOTH_COLOR_DEPTH") or "").strip() == "256":
+        return True
+    term = (os.getenv("TERM") or "").lower()
+    return "256color" in term or "xterm" in term or "screen" in term
+
+
+def _should_enable_ansi() -> bool:
+    if os.getenv("NO_COLOR"):
+        return False
+    if os.getenv("TERM", "").lower() == "dumb":
+        return False
+    try:
+        return sys.stdout.isatty()
+    except Exception:
+        return False
+
+
+def _resolve_theme() -> str:
+    theme = (os.getenv("SLOTH_THEME") or "auto").strip().lower()
+    if theme in ("dark", "light", "mono"):
+        return theme
+    # Авто-режим: без надежного способа определить фон — по умолчанию используем 'light'
+    return "light"
+
+
+class Colors:
+    """ANSI-коды цветов, зависящие от темы и окружения."""
+
+    _ENABLED = _should_enable_ansi()
+    _THEME = _resolve_theme()
+    _TRUECOLOR = _supports_truecolor()
+    _ANSI256 = _supports_256color()
+
+    # Пастельные, но контрастные палитры для 24-bit
+    _PALETTE_DARK_24 = {
+        "FAIL": _rgb(191, 97, 106),      # мягкий красный
+        "OKGREEN": _rgb(163, 190, 140),  # мягкий зеленый
+        "WARNING": _rgb(235, 203, 139),  # теплый желтый
+        "OKBLUE": _rgb(94, 129, 172),    # холодный синий
+        "HEADER": _rgb(180, 142, 173),   # пастельный пурпур
+        "CYAN": _rgb(136, 192, 208),     # спокойный циан
+        "GREY": _rgb(106, 114, 128),     # нейтральный серый
+    }
+
+    _PALETTE_LIGHT_24 = {
+        # Больше контраста на светлом фоне — слегка затемненные, но сохраняем пастельный тон
+        "FAIL": _rgb(170, 40, 55),       # более глубокий красный
+        "OKGREEN": _rgb(88, 133, 96),    # более темный зелёный
+        "WARNING": _rgb(152, 110, 0),    # янтарный/охра
+        "OKBLUE": _rgb(36, 71, 120),     # темно-голубой
+        "HEADER": _rgb(120, 70, 120),    # глубокий пурпур
+        "CYAN": _rgb(20, 110, 130),      # темный циан
+        "GREY": _rgb(80, 86, 98),        # насыщенный серый
+    }
+
+    # Пастельная 256-цветная палитра (приближения к 24-bit значениям)
+    def _c256(n: int) -> str:
+        return f"\033[38;5;{n}m"
+
+    _PALETTE_DARK_256 = {
+        "FAIL": _c256(174),     # мягкий красный
+        "OKGREEN": _c256(114),  # мягкий зеленый
+        "WARNING": _c256(180),  # теплый желтый
+        "OKBLUE": _c256(110),   # холодный синий
+        "HEADER": _c256(176),   # пастельный пурпур
+        "CYAN": _c256(109),     # спокойный циан
+        "GREY": _c256(246),     # нейтральный серый
+    }
+
+    _PALETTE_LIGHT_256 = {
+        # Чуть более тёмные пастельные оттенки для светлого фона
+        "FAIL": _c256(167),
+        "OKGREEN": _c256(108),
+        "WARNING": _c256(178),
+        "OKBLUE": _c256(67),
+        "HEADER": _c256(139),
+        "CYAN": _c256(73),
+        "GREY": _c256(238),  # тёмно-серый для читаемости
+    }
+
+    # Безопасная 8-цветная палитра (максимальная совместимость)
+    # Важная деталь: на светлой теме делаем GREY = чёрный (30), чтобы не был слишком бледным
+    _PALETTE_DARK_8 = {
+        "FAIL": "\033[31m",     # red
+        "OKGREEN": "\033[32m",  # green
+        "WARNING": "\033[33m",  # yellow
+        "OKBLUE": "\033[34m",   # blue
+        "HEADER": "\033[35m",  # magenta
+        "CYAN": "\033[36m",    # cyan
+        "GREY": "\033[90m",    # bright black (grey)
+    }
+
+    _PALETTE_LIGHT_8 = {
+        "FAIL": "\033[31m",
+        "OKGREEN": "\033[32m",
+        "WARNING": "\033[33m",
+        "OKBLUE": "\033[34m",
+        "HEADER": "\033[35m",
+        "CYAN": "\033[36m",
+        "GREY": "\033[30m",    # обычный чёрный для лучшей читаемости на белом
+    }
+
+    if _ENABLED and _THEME != "mono":
+        if _TRUECOLOR:
+            _P = _PALETTE_LIGHT_24 if _THEME == "light" else _PALETTE_DARK_24
+        elif _ANSI256:
+            _P = _PALETTE_LIGHT_256 if _THEME == "light" else _PALETTE_DARK_256
+        else:
+            _P = _PALETTE_LIGHT_8 if _THEME == "light" else _PALETTE_DARK_8
+        FAIL = _P["FAIL"]
+        OKGREEN = _P["OKGREEN"]
+        WARNING = _P["WARNING"]
+        OKBLUE = _P["OKBLUE"]
+        HEADER = _P["HEADER"]
+        CYAN = _P["CYAN"]
+        GREY = _P["GREY"]
+        BOLD = "\033[1m"
+        UNDERLINE = "\033[4m"
+        ENDC = "\033[0m"
+    else:
+        # Моно режим или цвета отключены
+        FAIL = ""
+        OKGREEN = ""
+        WARNING = ""
+        OKBLUE = ""
+        HEADER = ""
+        CYAN = ""
+        GREY = ""
+        BOLD = "" if os.getenv("NO_COLOR") else "\033[1m"
+        UNDERLINE = "" if os.getenv("NO_COLOR") else "\033[4m"
+        ENDC = ""
+
+
+def _supports_emoji() -> bool:
+    """Эвристика поддержки эмодзи.
+
+    - Можно принудительно выключить: SLOTH_EMOJI=0
+    - Можно принудительно включить: SLOTH_EMOJI=1
+    - По умолчанию: включаем только если кодировка stdout и locale — UTF-8.
+    """
+    env = os.getenv("SLOTH_EMOJI")
+    if env == "0":
+        return False
+    if env == "1":
+        return True
+    encs = [getattr(sys.stdout, "encoding", ""), locale.getpreferredencoding(False)]
+    return any(e and "utf" in e.lower() for e in encs)
+
+
+class Symbols:
+    """Набор символов с фолбэком на ASCII при отсутствии поддержки эмодзи."""
+
+    _EMOJI = _supports_emoji()
+
+    if _EMOJI:
+        CHECK = "✅"
+        CROSS = "❌"
+        INFO = "ℹ️"
+        GEAR = "⚙️"
+        SAVE = "💾"
+        BLUE_DOT = "🔵"
+        ROCKET = "🚀"
+        WARNING = "⚠️"
+        FLAG = "🏁"
+        SPINNER = "🔄"
+    else:
+        CHECK = "[OK]"
+        CROSS = "[ERR]"
+        INFO = "[i]"
+        GEAR = "[cfg]"
+        SAVE = "[save]"
+        BLUE_DOT = "[·]"
+        ROCKET = ">>"
+        WARNING = "[!]"
+        FLAG = "[end]"
+        SPINNER = "[~]"
+
+Файл: context_collector.py
+--------------------------
+# Файл: context_collector.py
+import os
+import re
+
+# --- КОНФИГУРАЦИЯ СБОРА КОНТЕКСТА ---
+IGNORE_EXTENSIONS = {".png", ".jpeg", ".jpg", ".gif", ".bmp", ".ico", ".svg", ".webp"}
+IGNORE_FILES = {
+    "go.mod", "go.sum", "package-lock.json", "yarn.lock",
+    ".ds_store", ".gitignore", "readme.md", "analyzer_wide", "tsconfig.tsbuildinfo",
+    "sloth_debug_prompt.txt", "sloth_debug_bad_response.txt"
+}
+IGNORE_DIRS = {
+    "venv", ".venv", "__pycache__", ".pytest_cache", "node_modules",
+    ".next", "dist", "build", "coverage", ".git", ".idea", ".vscode",
+    ".claude", "logs"
+}
+
+# --- ПРИВАТНЫЕ ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
+
+def _get_file_content(filepath):
+    """Безопасно читает содержимое текстового файла."""
+    try:
+        with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+            return f.read()
+    except Exception:
+        return None
+
+def _summarize_content(content, filepath):
+    """Сокращает содержимое файла, оставляя только ключевые сигнатуры."""
+    filename = os.path.basename(filepath)
+    _, extension = os.path.splitext(filename)
+    extension = extension.lower()
+
+    if extension == '.py':
+        matches = re.findall(r"^(?:@.*?\n)*(?:async\s+)?def\s+.*?\)|class\s+.*?:", content, re.MULTILINE)
+        if matches:
+            summary = [m + "\n    ... # implementation" for m in matches]
+            return f"# File: {filename}\n# Summary of declarations:\n\n" + "\n\n".join(summary)
+        return f"# File: {filename}\n# No top-level functions or classes found."
+
+    elif extension in ['.js', '.jsx', '.ts', '.tsx']:
+        matches = re.findall(r"^(?:export\s+)?(?:async\s+)?function\s+.*?\{|^(?:export\s+)?class\s+.*?\{|^(?:export\s+)?(?:const|let|var)\s+.*?=.*?;|^(?:export\s+)?type\s+.*?=.*?;|^(?:export\s+)?interface\s+.*?\{", content, re.MULTILINE)
+        if matches:
+            summary = [m + ("\n  // ... implementation\n}" if m.endswith('{') else "") for m in matches]
+            return f"// File: {filename}\n// Summary of declarations:\n\n" + "\n\n".join(summary)
+        return f"// File: {filename}\n// No top-level declarations found."
+        
+    elif extension in ['.html', '.css', '.scss', '.json', '.yml', '.yaml', '.xml', '.md']:
+         lines = content.splitlines()
+         if len(lines) > 20:
+             summary = "\n".join(lines[:10]) + "\n\n[... content truncated ...]\n\n" + "\n".join(lines[-5:])
+             return summary
+         return content
+
+    else:
+        lines = content.splitlines()
+        if len(lines) > 20:
+            return f"[Content of file {filename} truncated. First 10 lines:]\n" + "\n".join(lines[:10])
+        return content
+
+def _should_ignore(path, root_dir):
+    """Проверяет, следует ли игнорировать файл или директорию."""
+    path_lower = path.lower()
+    base_name = os.path.basename(path_lower)
+    sloth_scripts = {
+        "sloth.py"
+    }
+    if base_name in sloth_scripts: return True
+    if base_name in IGNORE_FILES: return True
+    if any(base_name.endswith(ext) for ext in IGNORE_EXTENSIONS): return True
+    rel_path = os.path.relpath(path_lower, root_dir)
+    path_parts = rel_path.split(os.sep)
+    if any(part in IGNORE_DIRS for part in path_parts): return True
+    return False
+
+# --- ГЛАВНАЯ ПУБЛИЧНАЯ ФУНКЦИЯ ---
+
+def gather_project_context(root_dir, mode='full', full_content_files=None, top_n_files=3):
+    """
+    Сканирует директорию проекта, собирает контент и возвращает его в виде одной большой строки.
+    """
+    if full_content_files is None: full_content_files = set()
+    else: full_content_files = {os.path.normpath(os.path.join(root_dir, f)) for f in full_content_files}
+
+    all_lines = []
+    file_sizes = {}
+    file_paths_to_include = []
+
+    for dirpath, dirnames, filenames in os.walk(root_dir, topdown=True):
+        dirnames[:] = [d for d in dirnames if not _should_ignore(os.path.join(dirpath, d), root_dir)]
+        for filename in sorted(filenames):
+            filepath = os.path.join(dirpath, filename)
+            if _should_ignore(filepath, root_dir): continue
+            content = _get_file_content(filepath)
+            if content is not None:
+                file_sizes[filepath] = len(content)
+                file_paths_to_include.append(filepath)
+
+    sorted_by_size = sorted(file_sizes.items(), key=lambda item: item[1], reverse=True)
+    top_files_set = {filepath for filepath, size in sorted_by_size[:top_n_files]}
+    
+    tree_structure = {}
+    for path in file_paths_to_include:
+        rel_path = os.path.relpath(path, root_dir)
+        parts = rel_path.split(os.sep)
+        node = tree_structure
+        for part in parts[:-1]: node = node.setdefault(part, {})
+        node[parts[-1]] = path
+
+    def generate_tree_lines_recursive(subtree, prefix=""):
+        lines = []
+        entries = sorted(subtree.items(), key=lambda item: isinstance(item[1], dict), reverse=True)
+        for i, (name, value) in enumerate(entries):
+            connector = "└── " if i == len(entries) - 1 else "├── "
+            if isinstance(value, dict):
+                lines.append(f"{prefix}{connector}{name}/")
+                lines.extend(generate_tree_lines_recursive(value, prefix + ("    " if i == len(entries) - 1 else "│   ")))
+            else:
+                size = file_sizes.get(value, 0)
+                marker = "!!!" if value in top_files_set else ""
+                lines.append(f"{prefix}{connector}{marker}{name} ({size} chars)")
+        return lines
+    tree_string = f"{os.path.basename(root_dir)}/\n" + "\n".join(generate_tree_lines_recursive(tree_structure))
+
+    all_lines.append("Сейчас я выгружу контекст проекта: сначала дерево файлов с размерами в символах, а потом их содержимое.")
+    all_lines.append("\n--- Структура проекта ---\n" + tree_string)
+    all_lines.append("\n--- Содержимое файлов ---")
+
+    for path in sorted(file_paths_to_include):
+        rel_path = os.path.relpath(path, root_dir)
+        all_lines.append(f"\nФайл: {rel_path}\n{'-' * len('Файл: ' + rel_path)}")
+        content = _get_file_content(path)
+        if content is None:
+            all_lines.append("Не удалось прочитать содержимое файла.")
+            continue
+        norm_path = os.path.normpath(path)
+        if mode == 'full' or norm_path in full_content_files:
+            all_lines.append(content)
+        else:
+            all_lines.append(_summarize_content(content, path))
+            
+    return "\n".join(all_lines)
+
+Файл: sloth_cli.py
+------------------
+# Файл: sloth_cli.py
+import os
+import sys
+import time
+import re
+import json
+import platform
+import subprocess
+import argparse
+from tkinter import Tk, filedialog
+import uuid
+
+from colors import Colors, Symbols
+import sloth_core
+import sloth_runner
+import context_collector
+
+# --- КОНСТАНТЫ ИНТЕРФЕЙСА ---
+MAX_ITERATIONS = 20
+HISTORY_FILE_NAME = 'sloth_history.json'
+RUN_LOG_FILE_NAME = 'sloth_run.log'
+
+def calculate_cost(model_name, input_tokens, output_tokens):
+    pricing_info = sloth_core.MODEL_PRICING.get(model_name)
+    if not pricing_info:
+        return 0.0
+    total_cost = 0.0
+    input_tiers = pricing_info.get("input", {}).get("tiers", [])
+    for tier in input_tiers:
+        if input_tokens <= tier["up_to"]:
+            total_cost += (tier["price"] / 1_000_000) * input_tokens
+            break
+    output_tiers = pricing_info.get("output", {}).get("tiers", [])
+    for tier in output_tiers:
+        if output_tokens <= tier["up_to"]:
+            total_cost += (tier["price"] / 1_000_000) * output_tokens
+            break
+    return total_cost
+
+def get_project_context(is_fast_mode, files_to_include_fully=None):
+    print(f"{Colors.CYAN}{Symbols.SPINNER} ЛОГ: Обновляю контекст проекта...{Colors.ENDC}")
+    try:
+        if is_fast_mode:
+            context_data = context_collector.gather_project_context(os.getcwd(), mode='full')
+        else:
+            mode = 'summarized'
+            if files_to_include_fully:
+                print(f"{Colors.GREY}{Symbols.INFO}  Полное содержимое файлов: {len(files_to_include_fully)} шт.{Colors.ENDC}")
+            context_data = context_collector.gather_project_context(
+                os.getcwd(), mode=mode, full_content_files=files_to_include_fully
+            )
+        print(f"{Colors.OKGREEN}{Symbols.CHECK} ЛОГ: Контекст успешно обновлен. Размер: {len(context_data)} символов.{Colors.ENDC}")
+        return context_data
+    except Exception as e:
+        print(f"{Colors.BOLD}{Colors.FAIL}{Symbols.CROSS} ЛОГ: КРИТИЧЕСКАЯ ОШИБКА в get_project_context: {e}{Colors.ENDC}")
+        return None
+
+def _log_run(log_file_path, title, content):
+    try:
+        with open(log_file_path, 'a', encoding='utf-8') as f:
+            f.write("\n" + "="*80 + "\n" + f"{title}\n" + "-"*80 + "\n")
+            f.write(str(content if content is not None else "<empty>") + "\n")
+    except Exception as e:
+        print(f"{Colors.WARNING}{Symbols.WARNING}  ПРЕДУПРЕЖДЕНИЕ: Не удалось записать в {log_file_path}: {e}{Colors.ENDC}")
+
+def _read_multiline_input(prompt):
+    print(prompt)
+    lines = []
+    empty_line_count = 0
+    while empty_line_count < 3:
+        try:
+            line = input()
+            if line:
+                lines.append(line)
+                empty_line_count = 0
+            else:
+                empty_line_count += 1
+        except EOFError:
+            break
+    return '\n'.join(lines).strip()
+
+def get_user_input():
+    goal_prompt = (f"{Colors.HEADER}{Colors.BOLD} Привет! Опиши свою основную цель.{Colors.ENDC}\n"
+                   f"{Colors.CYAN}{Symbols.INFO} (Для завершения ввода, нажми Enter 3 раза подряд){Colors.ENDC}")
+    user_goal = _read_multiline_input(goal_prompt)
+    if not user_goal:
+        return None, None
+    log_prompt = (f"\n{Colors.HEADER}{Colors.BOLD} Отлично. Теперь, если есть лог ошибки, вставь его. Если нет, просто нажми Enter 3 раза.{Colors.ENDC}")
+    error_log = _read_multiline_input(log_prompt)
+    return user_goal, error_log
+
+def extract_block(tag, text):
+    """Извлекает первый блок вида ```{tag}\n...\n```."""
+    lines = text.splitlines()
+    start_idx = None
+    fence_prefix = f"```{tag}"
+    for i, line in enumerate(lines):
+        if line.strip().startswith(fence_prefix):
+            start_idx = i + 1
+            break
+    if start_idx is None:
+        return None
+    for j in range(start_idx, len(lines)):
+        if lines[j].strip() == "```":
+            content = "\n".join(lines[start_idx:j])
+            return content.strip()
+    return None
+
+_ALLOWED_TAGS_AFTER_FENCE = {"summary","bash","manual","files","plan","clarification","done_summary","write_file"}
+
+def _parse_write_file_header(header_line: str):
+    header = header_line.strip()
+    if header.startswith("```write_file"):
+        header = header[len("```write_file"):].strip()
+    path, boundary = "", None
+    m = re.search(r'boundary\s*=\s*"([^"]+)"', header) or re.search(r'boundary\s*=\s*([^\s]+)', header)
+    if m: boundary = m.group(1).strip().strip('"').strip("'")
+    p = re.search(r'path\s*=\s*"([^"]+)"', header) or re.search(r'path\s*=\s*([^\s]+)', header)
+    if p: path = p.group(1).strip().strip('"').strip("'")
+    else:
+        for tok in header.split():
+            if "=" not in tok:
+                path = tok.strip().strip('"').strip("'"); break
+    return path, boundary
+
+def _iter_write_file_blocks(answer_text: str, boundary_token: str):
+    lines, i, n = answer_text.splitlines(), 0, len(answer_text.splitlines())
+    while i < n:
+        ln = lines[i].strip()
+        if ln.startswith("```write_file"):
+            filepath, boundary = _parse_write_file_header(ln)
+            i += 1
+            content = []
+            if boundary:  # главный путь: читаем до строки-границы
+                while i < n and lines[i].strip() != boundary:
+                    content.append(lines[i]); i += 1
+                if i < n and lines[i].strip() == boundary: i += 1
+                if i < n and lines[i].strip() == "```": i += 1
+                yield filepath, "\n".join(content); continue
+            # fallback: закрытие только если после ``` реально начинается новый блок
+            while i < n:
+                if lines[i].strip() == "```":
+                    j = i + 1
+                    while j < n and lines[j].strip() == "": j += 1
+                    if j >= n: break
+                    nxt = lines[j].strip()
+                    if nxt.startswith("```"): break
+                    if any(nxt.startswith(t) or nxt.startswith(f"```{t}") for t in _ALLOWED_TAGS_AFTER_FENCE):
+                        break
+                    content.append(lines[i]); i += 1; continue
+                content.append(lines[i]); i += 1
+            if i < n and lines[i].strip() == "```": i += 1
+            yield filepath, "\n".join(content); continue
+        i += 1
+
+def _normalize_model_path(p: str) -> str:
+    p = (p or "").strip().strip('"').strip("'").replace("\\","/")
+    if p.startswith("./"): p = p[2:]
+    cwd = os.getcwd(); root = os.path.basename(cwd.rstrip(os.sep))
+    cwd_posix = cwd.replace("\\","/").rstrip("/")
+    if p.startswith("/"):
+        if p.startswith(cwd_posix + "/"): p = p[len(cwd_posix)+1:]
+        else: p = p.lstrip("/")
+    if p.startswith(root + "/"): p = p[len(root)+1:]
+    p = os.path.normpath(p).replace("\\","/")
+    if p.startswith("../"): p = p[3:]
+    if p == ".": p = ""
+    return p
+
+def update_history_with_attempt(history_file_path, goal, summary):
+    try:
+        with open(history_file_path, 'r+', encoding='utf-8') as f:
+            history_data = json.load(f)
+            new_entry = {"initial_goal": goal, "solution_summary": summary}
+            history_data.setdefault("previous_attempts", []).insert(0, new_entry)
+            f.seek(0)
+            json.dump(history_data, f, indent=2, ensure_ascii=False)
+            f.truncate()
+        print(f"{Colors.OKGREEN}💾 ЛОГ: История решения обновлена в {history_file_path}.{Colors.ENDC}")
+    except Exception as e:
+        print(f"{Colors.FAIL}❌ ЛОГ: Не удалось обновить историю решения: {e}{Colors.ENDC}")
+
+def load_fix_history(history_file_path):
+    if not os.path.exists(history_file_path):
+        return None
+    try:
+        with open(history_file_path, 'r', encoding='utf-8') as f:
+            history_data = json.load(f)
+        attempts = history_data.get("previous_attempts", [])
+        if not attempts:
+            return None
+        last_attempt = attempts[0]
+        return (f"Это твоя самая последняя попытка решения, которая оказалась неверной:\n"
+                f"  - Поставленная задача: {last_attempt.get('initial_goal', 'N/A')}\n"
+                f"  - Твое 'решение': {last_attempt.get('solution_summary', 'N/A')}")
+    except Exception as e:
+        print(f"{Colors.FAIL}❌ ЛОГ: Не удалось загрузить или прочитать файл истории {history_file_path}: {e}{Colors.ENDC}")
+        return None
+
+def notify_user(message):
+    clean_message = re.sub(r'\033\[.*?m', '', message)
+    print(f"{Colors.OKBLUE}📢 ЛОГ: Отправляю итоговое уведомление...{Colors.ENDC}")
+    print(message)
+
+def cost_report(cost_log, total_cost):
+    print(f"\n{Colors.BOLD}{Colors.HEADER}--- ИТОГОВЫЙ ОТЧЕТ ПО СТОИМОСТИ ---{Colors.ENDC}")
+    for entry in cost_log:
+        phase, cost = entry['phase'], entry['cost']
+        if phase == 'PLANNING':
+            print(f"  Фаза: {phase:<12} | Стоимость: ${cost:.6f}")
+        else:
+            iteration = entry['iteration']
+            print(f"  Фаза: {phase:<12} | Итерация: {iteration:<2} | Стоимость: ${cost:.6f}")
+    print(f"{Colors.BOLD}\n  Общая стоимость задачи: ${total_cost:.6f}{Colors.ENDC}")
+
+def main(is_fix_mode, is_fast_mode, history_file_path, run_log_file_path):
+    # Модель инициализируется в точке входа до вызова этой функции.
+    model_instance, active_service = sloth_core.get_active_service_details()
+    if not model_instance:
+        # Этот проверка - мера предосторожности, основная точка входа уже должна была это проверить.
+        return f"{Colors.FAIL}Не удалось получить данные об инициализированной модели. Выход.{Colors.ENDC}"
+
+    total_cost, cost_log = 0.0, []
+    user_goal, error_log = get_user_input()
+    if not user_goal:
+        return f"{Colors.WARNING}Цель не была указана. Завершение работы.{Colors.ENDC}"
+    initial_task = user_goal + (f"\n\n--- ЛОГ ОШИБКИ ---\n{error_log}" if error_log else "")
+    
+    attempt_history, final_message = [], ""
+    state = "EXECUTION" if is_fast_mode else "PLANNING"
+    iteration_count, files_to_include_fully, current_prompt = 1, None, None
+
+    # Генерируем уникальный токен-границу для write_file
+    BOUNDARY_TOKEN = f"SLOTH_BOUNDARY_{uuid.uuid4().hex}"
+
+    while iteration_count <= MAX_ITERATIONS:
+        model_instance, active_service = sloth_core.get_active_service_details()
+
+        if state == "PLANNING":
+            print(f"\n{Colors.BOLD}{Colors.HEADER}--- ЭТАП: ПЛАНИРОВАНИЕ ---{Colors.ENDC}")
+            project_context = get_project_context(is_fast_mode=False, files_to_include_fully=None)
+            if not project_context:
+                return f"{Colors.FAIL}КРИТИЧЕСКАЯ ОШИБКА: Не удалось получить контекст проекта.{Colors.ENDC}"
+            current_prompt = sloth_core.get_clarification_and_planning_prompt(project_context, initial_task, boundary=BOUNDARY_TOKEN)
+        
+        elif state == "EXECUTION" and current_prompt is None:
+            project_context = get_project_context(is_fast_mode, files_to_include_fully)
+            if not project_context:
+                return f"{Colors.FAIL}КРИТИЧЕСКАЯ ОШИБКА: Не удалось обновить контекст.{Colors.ENDC}"
+            current_prompt = sloth_core.get_initial_prompt(
+                project_context, initial_task,
+                sloth_core.get_active_service_details() and (load_fix_history(history_file_path) if is_fix_mode else None),
+                boundary=BOUNDARY_TOKEN
+            )
+            
+        log_iter = iteration_count if state == "EXECUTION" else 0
+        if state == "EXECUTION":
+            print(f"\n{Colors.BOLD}{Colors.HEADER}{Symbols.ROCKET} --- ЭТАП: ИСПОЛНЕНИЕ | ИТЕРАЦИЯ {iteration_count}/{MAX_ITERATIONS} ---{Colors.ENDC}")
+        
+        _log_run(run_log_file_path, f"ЗАПРОС (Состояние: {state}, Итерация: {log_iter})", current_prompt)
+        answer_data = sloth_core.send_request_to_model(model_instance, active_service, current_prompt, log_iter)
+        
+        if not answer_data:
+            if sloth_core.model:
+                print(f"{Colors.WARNING}🔄 ЛОГ: Ответ от модели не получен, пробую снова...{Colors.ENDC}")
+                time.sleep(5)
+                continue
+            else:
+                final_message = "Критическая ошибка: Не удалось получить ответ и нет запасного API."
+                break
+
+        answer_text = answer_data["text"]
+        _log_run(run_log_file_path, f"ОТВЕТ (Состояние: {state}, Итерация: {log_iter})", answer_text)
+
+        cost = calculate_cost(sloth_core.MODEL_NAME, answer_data["input_tokens"], answer_data["output_tokens"])
+        total_cost += cost
+        cost_log.append({"phase": state, "iteration": log_iter, "cost": cost})
+        print(f"{Colors.GREY}📊 Статистика: Вход: {answer_data['input_tokens']} т., Выход: {answer_data['output_tokens']} т. Стоимость: ~${cost:.6f}{Colors.ENDC}")
+
+        if state == "PLANNING":
+            clarification = extract_block("clarification", answer_text)
+            if clarification:
+                print(f"{Colors.HEADER}{Colors.BOLD}🤖 Модель просит уточнений:{Colors.ENDC}\n{Colors.CYAN}{clarification}{Colors.ENDC}")
+                user_response = _read_multiline_input("Пожалуйста, предоставьте ответ на вопросы модели. (Enter 3 раза для завершения)")
+                initial_task += f"\n\n--- УТОЧНЕНИЕ ОТ ПОЛЬЗОВАТЕЛЯ ---\n{user_response}"
+                current_prompt = None
+                continue
+
+            plan = extract_block("plan", answer_text)
+            files_list_str = extract_block("files", answer_text)
+            if plan and files_list_str:
+                print(f"{Colors.OKGREEN}✅ Задача понятна. План получен.{Colors.ENDC}\n{Colors.HEADER}План действий:{Colors.ENDC}\n{Colors.CYAN}{plan}{Colors.ENDC}")
+                with open("sloth_plan.txt", "w", encoding='utf-8') as f:
+                    f.write(plan)
+                print(f"{Colors.OKGREEN}План сохранен в 'sloth_plan.txt'.{Colors.ENDC}")
+                raw_files_list = [line.strip() for line in files_list_str.split('\n') if line.strip()]
+                project_root_name = os.path.basename(os.getcwd()) + os.sep
+                files_to_include_fully = []
+                for f_path in raw_files_list:
+                    if f_path.startswith(project_root_name):
+                        normalized_path = f_path[len(project_root_name):]
+                        files_to_include_fully.append(normalized_path)
+                        print(f"{Colors.GREY}ℹ️  Путь нормализован: '{f_path}' -> '{normalized_path}'{Colors.ENDC}")
+                    else:
+                        files_to_include_fully.append(f_path)
+                print(f"{Colors.HEADER}Запрошены полные версии файлов:{Colors.ENDC}\n{Colors.CYAN}" + "\n".join(files_to_include_fully) + Colors.ENDC)
+                state = "EXECUTION"
+                current_prompt = None
+                continue
+            else:
+                print(f"{Colors.WARNING}⚠️ Модель не вернула ни уточнений, ни плана. Пробуем снова...{Colors.ENDC}")
+                time.sleep(5)
+                continue
+
+        elif state == "EXECUTION":
+            if extract_block("done_summary", answer_text) or answer_text.strip().upper().startswith("ГОТОВО"):
+                done_summary = extract_block("done_summary", answer_text) or "Задача выполнена."
+                final_message = f"{Colors.OKGREEN}{Symbols.CHECK} Задача выполнена успешно! (за {iteration_count} итераций){Colors.ENDC}"
+                update_history_with_attempt(history_file_path, user_goal, done_summary)
+                print(f"{Colors.OKGREEN}📄 ИТОГОВОЕ РЕЗЮМЕ:\n{Colors.CYAN}{done_summary}{Colors.ENDC}")
+                manual_steps = extract_block("manual", answer_text)
+                if manual_steps:
+                    final_message += f"\n\n{Colors.WARNING}✋ ТРЕБУЮТСЯ РУЧНЫЕ ДЕЙСТВИЯ:{Colors.ENDC}\n{manual_steps}"
+                break
+            
+            # --- ОБРАБОТКА ДЕЙСТВИЙ: write_file (мульти-блоки) или bash ---
+            commands_to_run = extract_block("bash", answer_text)
+            write_blocks = list(_iter_write_file_blocks(answer_text, boundary_token=BOUNDARY_TOKEN))
+            strategy_description = extract_block("summary", answer_text) or "Стратегия не описана"
+            
+            action_taken, success, failed_command, error_message = False, False, "N/A", ""
+
+            if write_blocks:
+                action_taken = True
+                for raw_filepath, content in write_blocks:
+                    try:
+                        filepath = _normalize_model_path(raw_filepath)
+                        print(f"\n{Colors.OKBLUE}📝 Найден блок write_file. Перезаписываю файл: {filepath}{Colors.ENDC}")
+                        dir_name = os.path.dirname(filepath)
+                        if dir_name:
+                            os.makedirs(dir_name, exist_ok=True)
+                        # Пишем БЕЗ strip(), С РОВНО ТЕМ СОДЕРЖИМЫМ, ЧТО ПРИШЛО
+                        # Жёсткий сэндбокс: запись только внутри корня проекта
+                        abs_path = os.path.realpath(filepath)
+                        root_abs = os.path.realpath(os.getcwd())
+                        if not abs_path.startswith(root_abs + os.sep):
+                            raise RuntimeError(f"Запрещён путь вне корня проекта: {filepath}")
+                        with open(filepath, "w", encoding="utf-8", newline="") as f:
+                            f.write(content)
+                        print(f"{Colors.OKGREEN}✅ Файл успешно перезаписан: {filepath}{Colors.ENDC}")
+                        success = True
+                    except Exception as e:
+                        print(f"{Colors.FAIL}❌ ОШИБКА при записи файла '{raw_filepath}': {e}{Colors.ENDC}")
+                        success = False
+                        failed_command = f"write_file {raw_filepath}"
+                        error_message = str(e)
+                        break  # прекращаем последовательность, чтобы вернуть ошибку корректно
+
+            elif commands_to_run:
+                action_taken = True
+                print(f"\n{Colors.OKBLUE}🔧 Найден блок shell-команд. Выполняю...{Colors.ENDC}")
+                success, failed_command, error_message = sloth_runner.execute_commands(commands_to_run)
+
+            if not action_taken:
+                print(f"{Colors.FAIL}❌ ЛОГ: Модель не вернула команд. Пробую на следующей итерации.{Colors.ENDC}")
+                project_context = get_project_context(is_fast_mode, files_to_include_fully)
+                current_prompt = sloth_core.get_review_prompt(project_context, user_goal, iteration_count + 1, attempt_history, boundary=BOUNDARY_TOKEN)
+                iteration_count += 1
+                continue
+            
+            project_context = get_project_context(is_fast_mode, files_to_include_fully)
+            if not project_context:
+                final_message = f"{Colors.FAIL}Критическая ошибка: не удалось обновить контекст.{Colors.ENDC}"
+                break
+
+            history_entry = f"**Итерация {iteration_count}:**\n**Стратегия:** {strategy_description}\n"
+            if success:
+                history_entry += "**Результат:** УСПЕХ"
+                current_prompt = sloth_core.get_review_prompt(project_context, user_goal, iteration_count + 1, attempt_history, boundary=BOUNDARY_TOKEN)
+            else:
+                history_entry += f"**Результат:** ПРОВАЛ\n**Ошибка:** {error_message}"
+                current_prompt = sloth_core.get_error_fixing_prompt(
+                    failed_command, error_message, user_goal, project_context, iteration_count + 1, attempt_history, boundary=BOUNDARY_TOKEN
+                )
+            
+            attempt_history.append(history_entry)
+            iteration_count += 1
+    
+    if not final_message:
+        final_message = f"{Colors.WARNING}⌛ Достигнут лимит в {MAX_ITERATIONS} итераций.{Colors.ENDC}"
+    cost_report(cost_log, total_cost)
+    return final_message
+
+# --- ТОЧКА ВХОДА ---
+if __name__ == "__main__":
+    SLOTH_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+    parser = argparse.ArgumentParser(description="Sloth: AI-ассистент для автоматического рефакторинга кода.")
+    parser.add_argument('--here', action='store_true', help='Запустить для проекта в текущей директории (игнорируется с --fix).')
+    parser.add_argument('--fix', action='store_true', help='Запустить в режиме исправления, загрузив настройки из последней сессии.')
+    parser.add_argument('--fast', action='store_true', help='Запустить в быстром режиме (игнорируется с --fix).')
+    args = parser.parse_args()
+
+    # --- 1. Инициализация модели ---
+    sloth_core.initialize_model()
+    model_instance, _ = sloth_core.get_active_service_details()
+    if not model_instance:
+        print(f"{Colors.FAIL}❌ КРИТИЧЕСКАЯ ОШИБКА: Не удалось инициализировать модель. "
+              f"Проверьте API-ключ или настройки соединения. Завершение работы.{Colors.ENDC}")
+        sys.exit(1)
+    print(f"{Colors.OKGREEN}✅ Модель AI успешно инициализирована.{Colors.ENDC}\n")
+
+    # --- 2. Определение пути к проекту ---
+    history_file_path = os.path.join(SLOTH_SCRIPT_DIR, HISTORY_FILE_NAME)
+    target_project_path, is_fast_mode = "", args.fast
+
+    if args.fix:
+        print(f"{Colors.CYAN}{Symbols.GEAR}  Активирован режим --fix. Загрузка конфигурации из {history_file_path}...{Colors.ENDC}")
+        if not os.path.exists(history_file_path):
+            print(f"{Colors.BOLD}{Colors.FAIL}{Symbols.CROSS} ОШИБКА: Файл истории {history_file_path} не найден.{Colors.ENDC}")
+            sys.exit(1)
+        try:
+            with open(history_file_path, 'r', encoding='utf-8') as f:
+                config = json.load(f).get("last_run_config")
+            target_project_path, is_fast_mode = config["target_project_path"], config["is_fast_mode"]
+            print(f"{Colors.OKGREEN}{Symbols.CHECK} Конфигурация загружена. Проект: {target_project_path}, Режим: {'Быстрый' if is_fast_mode else 'Интеллектуальный'}.{Colors.ENDC}")
+        except Exception as e:
+            print(f"{Colors.BOLD}{Colors.FAIL}{Symbols.CROSS} ОШИБКА: Не удалось прочитать конфигурацию: {e}{Colors.ENDC}")
+            sys.exit(1)
+    else:
+        if args.here:
+            target_project_path = os.getcwd()
+        else:
+            print(f"{Colors.OKBLUE}Пожалуйста, выберите папку проекта в открывшемся окне...{Colors.ENDC}")
+            root = Tk(); root.withdraw()
+            target_project_path = filedialog.askdirectory(title="Выберите папку проекта для Sloth")
+            root.destroy()
+        if not target_project_path:
+            print(f"{Colors.BOLD}{Colors.FAIL}{Symbols.CROSS} Папка проекта не была выбрана.{Colors.ENDC}")
+            sys.exit(1)
+        if os.path.exists(history_file_path):
+            os.remove(history_file_path)
+        initial_history = {
+            "last_run_config": {"target_project_path": target_project_path, "is_fast_mode": is_fast_mode},
+            "previous_attempts": []
+        }
+        with open(history_file_path, 'w', encoding='utf-8') as f:
+            json.dump(initial_history, f, indent=2, ensure_ascii=False)
+        print(f"{Colors.CYAN}{Symbols.SAVE} Конфигурация для новой сессии сохранена в {history_file_path}.{Colors.ENDC}")
+
+    # --- 3. Переход в директорию и запуск ---
+    print(f"{Colors.OKGREEN}{Symbols.CHECK} Рабочая директория проекта: {target_project_path}{Colors.ENDC}")
+    os.chdir(target_project_path)
+    run_log_file_path = os.path.join(SLOTH_SCRIPT_DIR, RUN_LOG_FILE_NAME)
+    try:
+        with open(run_log_file_path, 'w', encoding='utf-8') as f:
+            f.write(f"# SLOTH RUN LOG\n# Целевой проект: {target_project_path}\n# Режим: {'Быстрый' if is_fast_mode else 'Интеллектуальный'}\n")
+    except Exception as e:
+        print(f"{Colors.WARNING}{Symbols.WARNING}  ПРЕДУПРЕЖДЕНИЕ: Не удалось инициализировать {run_log_file_path}: {e}{Colors.ENDC}")
+    
+    final_status = "Работа завершена."
+    try:
+        final_status = main(is_fix_mode=args.fix, is_fast_mode=is_fast_mode, history_file_path=history_file_path, run_log_file_path=run_log_file_path)
+    except KeyboardInterrupt:
+        final_status = f"\n{Colors.OKBLUE}{Symbols.BLUE_DOT} Процесс прерван пользователем.{Colors.ENDC}"
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        final_status = f"\n{Colors.BOLD}{Colors.FAIL}{Symbols.CROSS} Скрипт аварийно завершился: {e}{Colors.ENDC}"
+    finally:
+        print(f"\n{final_status}")
+        print(f"\n{Colors.BOLD}{Symbols.FLAG} Скрипт завершил работу.{Colors.ENDC}")
+
+
+Файл: sloth_core.py
+-------------------
+# Файл: sloth_core.py
+"""
+Ядро интеграции с Gemini (Google AI / Vertex AI) для Sloth.
+
+Что изменил по сравнению с твоей версией:
+- БОЛЬШЕ НЕ ЗАДАЁТСЯ max_output_tokens → отдаём модели право писать максимум.
+- Добавлен thinking budget (бюджет на размышления), если доступен:
+  * При наличии нового SDK google-genai: через GenerateContentConfig(thinking_config=ThinkingConfig(...))
+  * В Vertex AI: через GenerationConfig(thinking_config=ThinkingConfig(...))
+  * В старом google.generativeai thinking недоступен — печатаю предупредительный лог.
+- Ответ собираю надёжно (response.text, либо parts), usage считываю бережно с запасными ветками.
+
+Примечание:
+- Значение бюджетa размышлений по умолчанию взял 24576 токенов, т.к. это безопасный высокий предел,
+  совместимый с 2.5-серией в большинстве конфигураций. Можно переопределить env SLOTH_THINKING_BUDGET.
+"""
+
+import os
+from colors import Colors
+
+# --- Попытка использовать новый Google GenAI SDK (предпочтительно) ---
+HAS_GOOGLE_GENAI = False
+try:
+    from google import genai as genai_new
+    from google.genai.types import GenerateContentConfig, ThinkingConfig
+    HAS_GOOGLE_GENAI = True
+except Exception:
+    genai_new = None
+    GenerateContentConfig = None
+    ThinkingConfig = None
+    HAS_GOOGLE_GENAI = False
+
+# --- Старый SDK (fallback, без thinking budget) ---
+HAS_LEGACY_GENAI = False
+try:
+    import google.generativeai as genai_legacy
+    HAS_LEGACY_GENAI = True
+except Exception:
+    genai_legacy = None
+    HAS_LEGACY_GENAI = False
+
+# --- Vertex AI SDK ---
+import vertexai
+from vertexai.generative_models import GenerativeModel, HarmCategory, HarmBlockThreshold
+# Эти импорты могут отсутствовать в старых версиях пакета; обрабатываем мягко
+try:
+    from vertexai.generative_models import GenerationConfig as VertexGenerationConfig  # тип конфигурации
+except Exception:
+    VertexGenerationConfig = None
+try:
+    from vertexai.generative_models import ThinkingConfig as VertexThinkingConfig     # thinking конфиг
+except Exception:
+    VertexThinkingConfig = None
+
+# --- НАСТРОЙКИ ЯДРА ---
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "AIzaSyA9kQwlc_fWpgQ64qG6yDJkis7PsgxljCw")
+GOOGLE_CLOUD_PROJECT = os.getenv("GOOGLE_CLOUD_PROJECT", "useful-gearbox-464618-v3")
+GOOGLE_CLOUD_LOCATION = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
+MODEL_NAME = os.getenv("SLOTH_MODEL_NAME", "gemini-2.5-pro")
+API_TIMEOUT_SECONDS = int(os.getenv("SLOTH_API_TIMEOUT", "600"))
+
+# ВАЖНО: максимальный бюджет размышлений. Можно переопределить через env SLOTH_THINKING_BUDGET
+THINKING_BUDGET_TOKENS = int(os.getenv("SLOTH_THINKING_BUDGET", "24576"))
+
+# Команды-исключения для bash
+ALLOWED_COMMANDS = (
+    "rm", "mv", "touch", "mkdir", "npm", "npx", "yarn", "pnpm", "git", "echo", "./"
+)
+
+MODEL_PRICING = {
+    "gemini-2.5-pro": {
+        "input": {"tiers": [{"up_to": 200000, "price": 1.25}, {"up_to": float('inf'), "price": 2.50}]},
+        "output": {"tiers": [{"up_to": 200000, "price": 10.00}, {"up_to": float('inf'), "price": 15.00}]}
+    },
+    "gemini-1.5-pro-latest": {
+        "input": {"tiers": [{"up_to": float('inf'), "price": 3.50}]},
+        "output": {"tiers": [{"up_to": float('inf'), "price": 10.50}]}
+    }
+}
+
+# --- Глобальные переменные состояния API ---
+model = None  # в режиме google-genai здесь будет client, в остальных — объект модели
+ACTIVE_API_SERVICE = "N/A"
+GOOGLE_AI_HAS_FAILED_THIS_SESSION = False
+
+# Базовая генерационная конфигурация — БЕЗ max_output_tokens!
+GENERATION_TEMPERATURE = float(os.getenv("SLOTH_TEMPERATURE", "1"))
+GENERATION_TOP_P = float(os.getenv("SLOTH_TOP_P", "1"))
+GENERATION_TOP_K = int(float(os.getenv("SLOTH_TOP_K", "1")))
+
+def _log_generation_params():
+    print(
+        f"{Colors.CYAN}🔧 ЛОГ: Параметры генерации:"
+        f" temperature={GENERATION_TEMPERATURE}, top_p={GENERATION_TOP_P}, top_k={GENERATION_TOP_K}."
+        f" max_output_tokens НЕ задан намеренно.{Colors.ENDC}"
+    )
+    print(
+        f"{Colors.CYAN}🧩 ЛОГ: Бюджет размышлений (thinking_budget) = {THINKING_BUDGET_TOKENS} токенов, если поддерживается SDK/модель.{Colors.ENDC}"
+    )
+
+def initialize_model():
+    """Инициализирует модель и выбирает доступный сервис с приоритетом:
+    1) Google GenAI SDK (api key) → thinking_config доступен
+    2) Старый google.generativeai (api key) → thinking_config недоступен
+    3) Vertex AI SDK (ADC/Service Account) → thinking_config доступен
+    """
+    global model, ACTIVE_API_SERVICE, GOOGLE_AI_HAS_FAILED_THIS_SESSION
+
+    print(f"{Colors.CYAN}⚙️  ЛОГ: Начинаю конфигурацию. Модель: {MODEL_NAME}{Colors.ENDC}")
+    _log_generation_params()
+
+    # --- Приоритет: новый Google GenAI SDK (api key) ---
+    if GOOGLE_API_KEY and HAS_GOOGLE_GENAI and not GOOGLE_AI_HAS_FAILED_THIS_SESSION:
+        print(f"{Colors.CYAN}🔑 ЛОГ: Пробую Google GenAI SDK (по API-ключу).{Colors.ENDC}")
+        try:
+            model = genai_new.Client(api_key=GOOGLE_API_KEY)
+            # Тестовый короткий вызов (не задаём max_output_tokens)
+            _ = model.models.generate_content(
+                model=MODEL_NAME,
+                contents="ping"
+            )
+            ACTIVE_API_SERVICE = "Google GenAI SDK"
+            print(f"{Colors.OKGREEN}✅ ЛОГ: Успешно инициализировано через {ACTIVE_API_SERVICE}.{Colors.ENDC}")
+            return
+        except Exception as e:
+            print(f"{Colors.WARNING}⚠️  ПРЕДУПРЕЖДЕНИЕ: Сбой инициализации GenAI SDK: {e}{Colors.ENDC}")
+            GOOGLE_AI_HAS_FAILED_THIS_SESSION = True
+            model = None
+
+    # --- Fallback: старый google.generativeai (api key) ---
+    if GOOGLE_API_KEY and HAS_LEGACY_GENAI and not model:
+        print(f"{Colors.CYAN}🔑 ЛОГ: Пробую старый google.generativeai (API Key).{Colors.ENDC}")
+        try:
+            genai_legacy.configure(api_key=GOOGLE_API_KEY)
+            # ВАЖНО: generation_config без max_output_tokens
+            generation_config = {
+                "temperature": GENERATION_TEMPERATURE,
+                "top_p": GENERATION_TOP_P,
+                "top_k": GENERATION_TOP_K,
+            }
+            model = genai_legacy.GenerativeModel(
+                model_name=MODEL_NAME,
+                generation_config=generation_config,
+                safety_settings={
+                    'HARM_CATEGORY_HARASSMENT': 'block_medium_and_above',
+                    'HARM_CATEGORY_HATE_SPEECH': 'block_medium_and_above',
+                    'HARM_CATEGORY_SEXUALLY_EXPLICIT': 'block_medium_and_above',
+                    'HARM_CATEGORY_DANGEROUS_CONTENT': 'block_none',
+                }
+            )
+            # Пробный вызов
+            model.generate_content("test", request_options={"timeout": 60})
+            ACTIVE_API_SERVICE = "Google AI (Legacy SDK)"
+            print(f"{Colors.OKGREEN}✅ ЛОГ: Инициализация через {ACTIVE_API_SERVICE} успешна.{Colors.ENDC}")
+            print(f"{Colors.WARNING}ℹ️  ЛОГ: В этом режиме thinking_budget недоступен. Рекомендую установить 'google-genai'.{Colors.ENDC}")
+            return
+        except Exception as e:
+            print(f"{Colors.WARNING}⚠️  ПРЕДУПРЕЖДЕНИЕ: Не удалось инициализировать старый SDK: {e}{Colors.ENDC}")
+            model = None
+
+    # --- Резерв: Vertex AI (ADC/Service Account) ---
+    print(f"{Colors.CYAN}🔩 ЛОГ: Пытаюсь инициализировать через Vertex AI SDK...{Colors.ENDC}")
+    try:
+        vertexai.init(project=GOOGLE_CLOUD_PROJECT, location=GOOGLE_CLOUD_LOCATION)
+
+        # Собираем конфиг без max_output_tokens
+        vertex_gen_conf = {
+            "temperature": GENERATION_TEMPERATURE,
+            "top_p": GENERATION_TOP_P,
+            "top_k": GENERATION_TOP_K,
+        }
+
+        # Добавим thinking_config, если класс доступен в установленной версии SDK
+        if VertexThinkingConfig is not None:
+            try:
+                vertex_gen_conf = VertexGenerationConfig(
+                    temperature=GENERATION_TEMPERATURE,
+                    top_p=GENERATION_TOP_P,
+                    top_k=GENERATION_TOP_K,
+                    thinking_config=VertexThinkingConfig(thinking_budget=THINKING_BUDGET_TOKENS),
+                )
+            except Exception:
+                # Если типизированный конфиг недоступен, передадим словарь (некоторые версии принимают dict)
+                vertex_gen_conf = {
+                    "temperature": GENERATION_TEMPERATURE,
+                    "top_p": GENERATION_TOP_P,
+                    "top_k": GENERATION_TOP_K,
+                    "thinking_config": {"thinking_budget": THINKING_BUDGET_TOKENS},
+                }
+
+        model = GenerativeModel(
+            model_name=MODEL_NAME,
+            generation_config=vertex_gen_conf,
+            safety_settings={
+                HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+                HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+                HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+                HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+            }
+        )
+        ACTIVE_API_SERVICE = "Vertex AI"
+        # Пробный вызов
+        _ = model.generate_content("ping")
+        print(f"{Colors.OKGREEN}✅ ЛОГ: Vertex AI SDK успешно инициализирован.{Colors.ENDC}")
+    except Exception as e:
+        print(f"{Colors.FAIL}❌ ЛОГ: КРИТИЧЕСКАЯ ОШИБКА: Не удалось инициализировать модель: {e}{Colors.ENDC}")
+        model = None
+        ACTIVE_API_SERVICE = "N/A"
+
+def get_active_service_details():
+    """Возвращает текущую модель/клиент и имя активного сервиса."""
+    return model, ACTIVE_API_SERVICE
+
+def _extract_text_and_usage_from_genai_response(resp):
+    # Пытаемся взять текст максимально надёжно
+    full_text = getattr(resp, "text", None)
+    if not full_text:
+        try:
+            # google-genai иногда возвращает candidates
+            cands = getattr(resp, "candidates", None) or []
+            parts_text = []
+            for c in cands:
+                try:
+                    ct = getattr(c, "content", None)
+                    if ct and getattr(ct, "parts", None):
+                        for p in ct.parts:
+                            t = getattr(p, "text", None)
+                            if t:
+                                parts_text.append(t)
+                except Exception:
+                    pass
+            full_text = "".join(parts_text) if parts_text else ""
+        except Exception:
+            full_text = ""
+
+    # usage
+    prompt_tokens = 0
+    output_tokens = 0
+    try:
+        um = getattr(resp, "usage_metadata", None)
+        if um:
+            prompt_tokens = getattr(um, "prompt_token_count", getattr(um, "input_tokens", 0)) or 0
+            output_tokens = getattr(um, "candidates_token_count", getattr(um, "output_tokens", 0)) or 0
+    except Exception:
+        pass
+    return full_text, prompt_tokens, output_tokens
+
+def send_request_to_model(model_instance, active_service, prompt_text, iteration_count=0):
+    """Возвращает словарь с текстом ответа и информацией о токенах."""
+    global GOOGLE_AI_HAS_FAILED_THIS_SESSION
+
+    try:
+        log_header = f"[Итерация {iteration_count}]" if iteration_count > 0 else "[Этап планирования]"
+        print(f"{Colors.CYAN}🧠 ЛОГ: {log_header} Готовлю запрос в модель ({active_service}).{Colors.ENDC}")
+        print(f"{Colors.CYAN}⏳ ЛОГ: Отправляю запрос... (таймаут: {API_TIMEOUT_SECONDS} сек){Colors.ENDC}")
+
+        if active_service == "Google GenAI SDK":
+            # Новый клиент + thinking_config
+            cfg = GenerateContentConfig(
+                temperature=GENERATION_TEMPERATURE,
+                top_p=GENERATION_TOP_P,
+                top_k=GENERATION_TOP_K,
+                # критично: не задаём max_output_tokens
+                thinking_config=ThinkingConfig(thinking_budget=THINKING_BUDGET_TOKENS),
+            )
+            response = model_instance.models.generate_content(
+                model=MODEL_NAME,
+                contents=prompt_text,
+                config=cfg,
+            )
+            text, in_tok, out_tok = _extract_text_and_usage_from_genai_response(response)
+
+        elif active_service == "Google AI (Legacy SDK)":
+            # Старый generativeai; thinking тут недоступен, max_output_tokens не задаем
+            request_options = {"timeout": API_TIMEOUT_SECONDS}
+            response = model_instance.generate_content(prompt_text, request_options=request_options)
+            # Склейка ответа
+            text = getattr(response, "text", None)
+            if not text:
+                try:
+                    text = "".join(part.text for part in response.parts)
+                except Exception:
+                    text = str(response)
+            # usage
+            in_tok = 0
+            out_tok = 0
+            try:
+                um = response.usage_metadata
+                in_tok = getattr(um, "prompt_token_count", 0) or 0
+                out_tok = getattr(um, "candidates_token_count", 0) or 0
+            except Exception:
+                pass
+
+        elif active_service == "Vertex AI":
+            response = model_instance.generate_content(prompt_text)
+            text = getattr(response, "text", None)
+            if not text:
+                try:
+                    text = "".join(part.text for part in response.parts)
+                except Exception:
+                    text = str(response)
+            in_tok = 0
+            out_tok = 0
+            try:
+                um = response.usage_metadata
+                in_tok = getattr(um, "prompt_token_count", 0) or 0
+                out_tok = getattr(um, "candidates_token_count", 0) or 0
+            except Exception:
+                pass
+
+        else:
+            raise ValueError(f"Неизвестный сервис API: {active_service}")
+
+        if not text:
+            raise ValueError("Ответ от модели пустой.")
+
+        print(f"{Colors.OKGREEN}✅ ЛОГ: Ответ от модели получен успешно.{Colors.ENDC}")
+        return {"text": text, "input_tokens": in_tok, "output_tokens": out_tok}
+
+    except Exception as e:
+        print(f"{Colors.FAIL}❌ ЛОГ: ОШИБКА при запросе к API ({active_service}): {e}{Colors.ENDC}")
+        # Автопереключение: при сбое GenAI SDK пробуем Vertex
+        if active_service == "Google GenAI SDK":
+            print(f"{Colors.CYAN}🔄 ЛОГ: Переключаюсь на Vertex AI как резерв...{Colors.ENDC}")
+            GOOGLE_AI_HAS_FAILED_THIS_SESSION = True
+            initialize_model()
+        return None
+
+def get_command_rules(stage='execution', boundary=None):
+    """
+    Возвращает правила в зависимости от этапа (планирование или исполнение).
+    """
+    boundary_instr = ""
+    if boundary:
+        boundary_instr = f"""
+**Формат write_file с BOUNDARY (обязателен):**
+```write_file path="path/to/file" boundary="{boundary}"
+<любой контент файла, в т.ч. с внутренними ```
+ и ```bash блоками>
+{boundary}
+
+Последняя строка ПЕРЕД закрывающим ``` — ровно {boundary}.
+"""
+
+    base_rules = f"""
+**ГЛОБАЛЬНЫЕ ПРАВИЛА (ОБЯЗАТЕЛЬНЫ К ИСПОЛНЕНИЮ):**
+
+1.  **ПРАВИЛО ПУТЕЙ (САМОЕ ВАЖНОЕ!):**
+    *   Все пути к файлам, которые ты используешь (в блоках `files`, `write_file`, `bash`), ДОЛЖНЫ быть **относительными от корня проекта**.
+    *   **КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО** начинать путь с имени корневой папки проекта. Система автоматически работает из корня проекта.
+    *   **Пример:** Если проект находится в папке `/path/to/my-project`, и тебе нужен файл `src/app.js`:
+        *   **ПРАВИЛЬНО:** `src/app.js`
+        *   **НЕПРАВИЛЬНО:** `my-project/src/app.js`
+
+2.  **Рабочая Директория:** Все команды выполняются из **корня проекта**. **ЗАПРЕЩЕНО** использовать `cd`.
+
+3.  **Разрешенные Команды:** `{', '.join(ALLOWED_COMMANDS)}`. Команды, не входящие в этот список, должны быть помещены в блок ```manual```.
+
+4.  **Фокус и Прагматизм:** Твоя главная цель — решить **исходную задачу** пользователя. Не занимайся перфекционизмом: не исправляй стиль кода и не делай рефакторинг, не связанный с задачей.
+"""
+
+    if stage == 'execution':
+        return f"""
+Ты — AI-ассистент в автоматизированной системе. Твоя задача — анализировать код и генерировать команды для его изменения.
+
+**ПРАВИЛА ЭТАПА ИСПОЛНЕНИЯ:**
+
+1.  **ПРАВИЛО №1: ТОЛЬКО `write_file`**
+    *   Для **создания НОВЫХ** или **изменения СУЩЕСТВУЮЩИХ** файлов ты **ОБЯЗАН** использовать **только** блок ```write_file```.
+    *   Этот блок полностью перезаписывает файл.
+
+2.  **ПРАВИЛО №2: ПОЛНОТА КОДА (КРИТИЧЕСКИ ВАЖНО!)**
+    *   Внутри блока ```write_file``` ты должен предоставить **ПОЛНОЕ СОДЕРЖИМОЕ** файла от первой до последней строчки.
+    *   **КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО** использовать плейсхолдеры, многоточия (`...`), комментарии (`// ... остальной код`) или любые другие способы сокращения кода.
+
+3.  **Формат Ответа:**
+    *   **Действия:** Твой ответ **ОБЯЗАН** содержать ОДИН из блоков действий и СРАЗУ ПОСЛЕ него блок `summary`:
+        1.  **Для команд терминала:** ```bash ... ```.
+        2.  **Для СОЗДАНИЯ/ИЗМЕНЕНИЯ файла:** ```write_file path/to/file.py ... ```.
+    *   **Завершение:** Если задача решена, напиши **только** `ГОТОВО`, затем блок ```done_summary ... ```. Для ручных шагов добавь блок ```manual```.
+
+{base_rules}
+{boundary_instr}
+"""
+
+    if stage == 'planning':
+        return f"""
+Ты — AI-планировщик. Первая задача — убедиться, что исходная задача понятна.
+
+**ПРАВИЛА ПЛАНИРОВАНИЯ:**
+
+1.  Анализируй задачу и **сокращённый** контекст проекта.
+2.  **Два пути**:
+    *   Если задача **непонятна** — верни только ```clarification ... ```.
+    *   Если задача **понятна** — верни ```plan ... ``` и ```files ... ```.
+3.  Запрещено генерировать ```bash``` или `write_file` на этапе планирования.
+
+{base_rules}
+{boundary_instr}
+"""
+
+def get_clarification_and_planning_prompt(context, task, boundary=None):
+    rules = get_command_rules(stage='planning', boundary=boundary)
+    return f"""{rules}
+
+--- КОНТЕКСТ ПРОЕКТА (СОКРАЩЕННЫЙ) ---
+{context}
+--- КОНЕЦ КОНТЕКСТА ---
+
+--- ЗАДАЧА ПОЛЬЗОВАТЕЛЯ ---
+{task}
+--- КОНЕЦ ЗАДАЧИ ---
+
+Проанализируй задачу и контекст. Следуй правилам этапа планирования.
+"""
+
+def get_initial_prompt(context, task, fix_history=None, boundary=None):
+    history_prompt_section = ""
+    if fix_history:
+        history_prompt_section = f"""
+--- ИСТОРИЯ ПРЕДЫДУЩЕГО РЕШЕНИЯ, КОТОРОЕ ОКАЗАЛОСЬ НЕВЕРНЫМ ---
+{fix_history}
+--- КОНЕЦ ИСТОРИИ ---
+Проанализируй свою прошлую ошибку и начни заново.
+"""
+    return f"""{get_command_rules(stage='execution', boundary=boundary)}
+{history_prompt_section}
+--- КОНТЕКСТ ПРОЕКТА (ПОЛНЫЙ ИЛИ ЧАСТИЧНЫЙ) ---
+{context}
+--- КОНЕЦ КОНТЕКСТА ---
+Задача: {task}
+Проанализируй задачу и предоставь ответ, строго следуя правилам исполнения.
+"""
+
+def get_review_prompt(context, goal, iteration_count, attempt_history, boundary=None):
+    iteration_info = ""
+    if iteration_count >= 4:
+        iteration_info = f"\n**ОСОБОЕ ВНИМАНИЕ (Итерация {iteration_count}):** Сделано уже несколько шагов — проанализируй проблему глубже.\n"
+    history_info = ""
+    if attempt_history:
+        history_info = (
+            "--- ИСТОРИЯ ПРЕДЫДУЩИХ ПОПЫТОК ---\n" +
+            "\n---\n".join(attempt_history) +
+            "\n--- КОНЕЦ ИСТОРИИ ---\n"
+        )
+    return f"""{get_command_rules(stage='execution', boundary=boundary)}
+{iteration_info}
+{history_info}
+**ВАЖНО:** Предыдущий шаг выполнен. Код ниже — это **обновлённое состояние** проекта.
+
+**Твоя задача — ВЕРИФИКАЦИЯ:**
+1) Проанализируй текущий код с учётом истории.
+2) Если цель достигнута — напиши `ГОТОВО`.
+3) Иначе — дай следующий блок действий и `summary`.
+
+--- КОНТЕКСТ ПРОЕКТА (ОБНОВЛЁННЫЙ) ---
+{context}
+--- КОНЕЦ КОНТЕКСТА ---
+
+Напоминаю ИСХОДНУЮ ЦЕЛЬ: {goal}
+"""
+
+def get_error_fixing_prompt(failed_command, error_message, goal, context, iteration_count, attempt_history, boundary=None):
+    iteration_info = ""
+    if iteration_count >= 4:
+        iteration_info = f"\n**ОСОБОЕ ВНИМАНИЕ (Итерация {iteration_count}):** Произошла ошибка — подумай шире и исправь её надёжно.\n"
+    history_info = ""
+    if attempt_history:
+        history_info = (
+            "--- ИСТОРИЯ ПРЕДЫДУЩИХ ПОПЫТОК ---\n" +
+            "\n---\n".join(attempt_history) +
+            "\n--- КОНЕЦ ИСТОРИИ ---\n"
+        )
+    return f"""{get_command_rules(stage='execution', boundary=boundary)}
+{iteration_info}
+{history_info}
+**ВАЖНО:** Исправь ошибку. Не пиши `ГОТОВО`.
+
+--- ДАННЫЕ ОБ ОШИБКЕ ---
+КОМАНДА: {failed_command}
+СООБЩЕНИЕ (stderr): {error_message}
+--- КОНЕЦ ДАННЫХ ОБ ОШИБКЕ ---
+
+Исходная ЦЕЛЬ была: {goal}
+
+Дай исправленный блок команд и `summary`.
+
+--- КОНТЕКСТ, ГДЕ ПРОИЗОШЛА ОШИБКА ---
+{context}
+--- КОНЕЦ КОНТЕКСТА ---
+"""
+
+
+Файл: sloth_history.json
+------------------------
+{
+  "last_run_config": {
+    "target_project_path": "/Users/vladimirdoronin/VovkaNowEngineer/tutor-game-new",
+    "is_fast_mode": false
+  },
+  "previous_attempts": [
+    {
+      "initial_goal": "Научи меня пожалуйста как запускать этот проект, кажется там был специальный файл для запуска, как запустить чтобы все работало, желательно самый быстрый и простой способ",
+      "solution_summary": "Я создал файл README.md с подробными инструкциями по запуску, как и просил пользователь. Этот файл теперь находится в корне проекта и служит единым источником информации для настройки и старта приложения. Задача решена полностью."
+    }
+  ]
+}
+
+Файл: sloth_run.log
+-------------------
+# SLOTH RUN LOG
+# Целевой проект: /Users/vladimirdoronin/VovkaNowEngineer/tutor-game-new
+# Режим: Интеллектуальный
+
+================================================================================
+ЗАПРОС (Состояние: PLANNING, Итерация: 0)
+--------------------------------------------------------------------------------
+
+Ты — AI-планировщик. Первая задача — убедиться, что исходная задача понятна.
+
+**ПРАВИЛА ПЛАНИРОВАНИЯ:**
+
+1.  Анализируй задачу и **сокращённый** контекст проекта.
+2.  **Два пути**:
+    *   Если задача **непонятна** — верни только ```clarification ... ```.
+    *   Если задача **понятна** — верни ```plan ... ``` и ```files ... ```.
+3.  Запрещено генерировать ```bash``` или `write_file` на этапе планирования.
+
+
+**ГЛОБАЛЬНЫЕ ПРАВИЛА (ОБЯЗАТЕЛЬНЫ К ИСПОЛНЕНИЮ):**
+
+1.  **ПРАВИЛО ПУТЕЙ (САМОЕ ВАЖНОЕ!):**
+    *   Все пути к файлам, которые ты используешь (в блоках `files`, `write_file`, `bash`), ДОЛЖНЫ быть **относительными от корня проекта**.
+    *   **КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО** начинать путь с имени корневой папки проекта. Система автоматически работает из корня проекта.
+    *   **Пример:** Если проект находится в папке `/path/to/my-project`, и тебе нужен файл `src/app.js`:
+        *   **ПРАВИЛЬНО:** `src/app.js`
+        *   **НЕПРАВИЛЬНО:** `my-project/src/app.js`
+
+2.  **Рабочая Директория:** Все команды выполняются из **корня проекта**. **ЗАПРЕЩЕНО** использовать `cd`.
+
+3.  **Разрешенные Команды:** `rm, mv, touch, mkdir, npm, npx, yarn, pnpm, git, echo, ./`. Команды, не входящие в этот список, должны быть помещены в блок ```manual```.
+
+4.  **Фокус и Прагматизм:** Твоя главная цель — решить **исходную задачу** пользователя. Не занимайся перфекционизмом: не исправляй стиль кода и не делай рефакторинг, не связанный с задачей.
+
+
+**Формат write_file с BOUNDARY (обязателен):**
+```write_file path="path/to/file" boundary="SLOTH_BOUNDARY_070162a1463b4766a0640e529949ed46"
+<любой контент файла, в т.ч. с внутренними ```
+ и ```bash блоками>
+SLOTH_BOUNDARY_070162a1463b4766a0640e529949ed46
+
+Последняя строка ПЕРЕД закрывающим ``` — ровно SLOTH_BOUNDARY_070162a1463b4766a0640e529949ed46.
+
+
+
+--- КОНТЕКСТ ПРОЕКТА (СОКРАЩЕННЫЙ) ---
+Сейчас я выгружу контекст проекта: сначала дерево файлов с размерами в символах, а потом их содержимое.
+
+--- Структура проекта ---
+tutor-game-new/
+├── frontend/
+│   ├── src/
+│   │   ├── types/
+│   │   │   ├── models.ts (2928 chars)
+│   │   │   └── websocket.ts (739 chars)
+│   │   ├── context/
+│   │   │   └── SocketContext.tsx (541 chars)
+│   │   ├── locales/
+│   │   │   ├── ru/
+│   │   │   │   └── translation.json (16998 chars)
+│   │   │   └── en/
+│   │   │       └── translation.json (16324 chars)
+│   │   ├── app/
+│   │   │   ├── hooks/
+│   │   │   │   ├── index.ts (106 chars)
+│   │   │   │   ├── useAppDispatch.ts (305 chars)
+│   │   │   │   └── useAppSelector.ts (185 chars)
+│   │   │   ├── api/
+│   │   │   │   ├── apiSlice.ts (418 chars)
+│   │   │   │   └── axiosBaseQuery.ts (1500 chars)
+│   │   │   └── store.ts (801 chars)
+│   │   ├── features/
+│   │   │   ├── chat/
+│   │   │   │   ├── Chat.tsx (6539 chars)
+│   │   │   │   ├── chatApi.ts (601 chars)
+│   │   │   │   └── chatSlice.ts (2844 chars)
+│   │   │   ├── auth/
+│   │   │   │   ├── authApi.ts (4588 chars)
+│   │   │   │   └── authSlice.ts (3370 chars)
+│   │   │   ├── student/
+│   │   │   │   ├── adventureSlice.ts (1773 chars)
+│   │   │   │   └── studentApi.ts (3518 chars)
+│   │   │   ├── lesson/
+│   │   │   │   └── lessonApi.ts (4505 chars)
+│   │   │   ├── teacher/
+│   │   │   │   ├── StudentsPage.tsx (5798 chars)
+│   │   │   │   └── teacherApi.ts (2085 chars)
+│   │   │   └── goal/
+│   │   │       └── goalApi.ts (6184 chars)
+│   │   ├── components/
+│   │   │   ├── common/
+│   │   │   │   ├── Layout.tsx (18081 chars)
+│   │   │   │   ├── Spinner.tsx (645 chars)
+│   │   │   │   └── WebSocketManager.tsx (7900 chars)
+│   │   │   └── icons/
+│   │   │       └── index.ts (150 chars)
+│   │   ├── pages/
+│   │   │   ├── chat/
+│   │   │   │   └── ChatPage.tsx (933 chars)
+│   │   │   ├── student/
+│   │   │   │   ├── CompletedLessonsPage.tsx (5904 chars)
+│   │   │   │   ├── StoryHistoryPage.tsx (4448 chars)
+│   │   │   │   ├── !!!StudentAdventurePage.tsx (27808 chars)
+│   │   │   │   ├── StudentDashboard.tsx (4404 chars)
+│   │   │   │   └── StudentStoriesListPage.tsx (2645 chars)
+│   │   │   ├── teacher/
+│   │   │   │   ├── components/
+│   │   │   │   │   ├── CharacterEditor.tsx (8637 chars)
+│   │   │   │   │   ├── ControlWorkContentEditor.tsx (7310 chars)
+│   │   │   │   │   ├── LessonContentEditor.tsx (10291 chars)
+│   │   │   │   │   ├── LessonStatusIndicator.tsx (1296 chars)
+│   │   │   │   │   ├── LessonStoryEditor.tsx (11097 chars)
+│   │   │   │   │   └── RoadmapSection.tsx (12172 chars)
+│   │   │   │   ├── CreateGoalPage.tsx (6966 chars)
+│   │   │   │   ├── LearningGoalsListPage.tsx (3367 chars)
+│   │   │   │   ├── LessonEditorModal.tsx (7587 chars)
+│   │   │   │   ├── !!!RoadmapEditorPage.tsx (19768 chars)
+│   │   │   │   └── TeacherDashboard.tsx (2032 chars)
+│   │   │   ├── HomePage.tsx (6282 chars)
+│   │   │   ├── LoginPage.tsx (6482 chars)
+│   │   │   ├── NotFoundPage.tsx (1517 chars)
+│   │   │   └── RegisterPage.tsx (10655 chars)
+│   │   ├── App.tsx (4010 chars)
+│   │   ├── AuthInitializer.tsx (1937 chars)
+│   │   ├── i18n.ts (866 chars)
+│   │   ├── index.css (10114 chars)
+│   │   ├── main.tsx (687 chars)
+│   │   └── vite-env.d.ts (204 chars)
+│   ├── index.html (1033 chars)
+│   ├── package.json (1303 chars)
+│   ├── postcss.config.js (80 chars)
+│   ├── tailwind.config.js (3081 chars)
+│   ├── tsconfig.json (793 chars)
+│   ├── tsconfig.node.json (511 chars)
+│   └── vite.config.ts (1373 chars)
+├── backend/
+│   ├── prisma/
+│   │   ├── migrations/
+│   │   │   ├── 20250622134108_final_schema_update/
+│   │   │   │   └── migration.sql (7197 chars)
+│   │   │   ├── 20250706111311_remove_obsolete_story_model/
+│   │   │   │   └── migration.sql (339 chars)
+│   │   │   ├── 20250622202034_add_character_and_story_models/
+│   │   │   │   └── migration.sql (1121 chars)
+│   │   │   ├── 20250708100000_add_illustration_style/
+│   │   │   │   └── migration.sql (112 chars)
+│   │   │   ├── 20250623091331_add_image_prompt_to_story_chapter/
+│   │   │   │   └── migration.sql (945 chars)
+│   │   │   ├── 20250622144309_add_language_to_goal/
+│   │   │   │   └── migration.sql (102 chars)
+│   │   │   ├── 20250707120000_remove_badges/
+│   │   │   │   └── migration.sql (153 chars)
+│   │   │   ├── 20250623153940_enhance_performance_log/
+│   │   │   │   └── migration.sql (155 chars)
+│   │   │   ├── 20250623180646_make_log_fields_optional/
+│   │   │   │   └── migration.sql (2078 chars)
+│   │   │   ├── 20250719195723_add_control_work_lesson_type/
+│   │   │   │   └── migration.sql (63 chars)
+│   │   │   └── migration_lock.toml (128 chars)
+│   │   └── schema.prisma (6235 chars)
+│   ├── scripts/
+│   │   ├── check-db.ts (817 chars)
+│   │   ├── createTestUsers.ts (4550 chars)
+│   │   └── lowercase-emails.ts (2380 chars)
+│   ├── src/
+│   │   ├── config/
+│   │   │   └── env.ts (2623 chars)
+│   │   ├── middlewares/
+│   │   │   ├── auth.middleware.ts (1266 chars)
+│   │   │   └── teacher.middleware.ts (937 chars)
+│   │   ├── utils/
+│   │   │   ├── errors.ts (1236 chars)
+│   │   │   ├── fileUpload.ts (1807 chars)
+│   │   │   └── logger.ts (2445 chars)
+│   │   ├── controllers/
+│   │   │   ├── auth.controller.ts (9772 chars)
+│   │   │   ├── character.controller.ts (6168 chars)
+│   │   │   ├── chat.controller.ts (905 chars)
+│   │   │   ├── goal.controller.ts (5466 chars)
+│   │   │   ├── lesson.controller.ts (5886 chars)
+│   │   │   ├── performanceLogs.controller.ts (1519 chars)
+│   │   │   ├── roadmap.controller.ts (6124 chars)
+│   │   │   ├── story.controller.ts (13301 chars)
+│   │   │   ├── student.controller.ts (16801 chars)
+│   │   │   └── teacher.controller.ts (3101 chars)
+│   │   ├── routes/
+│   │   │   ├── auth.routes.ts (674 chars)
+│   │   │   ├── character.routes.ts (779 chars)
+│   │   │   ├── chat.routes.ts (452 chars)
+│   │   │   ├── goal.routes.ts (770 chars)
+│   │   │   ├── image.routes.ts (466 chars)
+│   │   │   ├── lesson.routes.ts (715 chars)
+│   │   │   ├── roadmap.routes.ts (554 chars)
+│   │   │   ├── story.routes.ts (956 chars)
+│   │   │   ├── student.routes.ts (1482 chars)
+│   │   │   └── teacher.routes.ts (951 chars)
+│   │   ├── services/
+│   │   │   ├── auth.service.ts (8499 chars)
+│   │   │   ├── chat.service.ts (1691 chars)
+│   │   │   ├── !!!gemini.service.ts (22583 chars)
+│   │   │   ├── leonardo.service.ts (6637 chars)
+│   │   │   └── websocket.service.ts (7143 chars)
+│   │   ├── app.ts (4619 chars)
+│   │   ├── db.ts (895 chars)
+│   │   └── index.ts (912 chars)
+│   ├── .env (1473 chars)
+│   ├── .env.example (505 chars)
+│   ├── package.json (1430 chars)
+│   ├── start.sh (332 chars)
+│   └── tsconfig.json (386 chars)
+└── package.json (1191 chars)
+
+--- Содержимое файлов ---
+
+Файл: backend/.env
+------------------
+[Content of file .env truncated. First 10 lines:]
+# tutor-game/backend/.env
+
+# --- Server Configuration ---
+NODE_ENV=development
+PORT=3002
+
+# --- Database Configuration ---
+# URL для подключения к твоей локальной базе данных PostgreSQL
+DATABASE_URL="postgresql://vladimirdoronin@localhost:5432/tutor_game?schema=public"
+
+
+Файл: backend/.env.example
+--------------------------
+[Content of file .env.example truncated. First 10 lines:]
+# Server Configuration
+PORT=3001
+NODE_ENV=development
+
+# JWT Configuration
+JWT_SECRET=your_jwt_secret_key_here
+JWT_EXPIRES_IN=7d
+
+# Database Configuration
+DATABASE_URL=postgresql://username:password@localhost:5432/math_quest?schema=public
+
+Файл: backend/package.json
+--------------------------
+{
+  "name": "backend",
+  "version": "1.0.0",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
+    "start": "./start.sh",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev",
+
+[... content truncated ...]
+
+    "prisma": "^6.8.2",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^5.0.0"
+  }
+}
+
+Файл: backend/prisma/migrations/20250622134108_final_schema_update/migration.sql
+--------------------------------------------------------------------------------
+[Content of file migration.sql truncated. First 10 lines:]
+-- CreateEnum
+CREATE TYPE "Role" AS ENUM ('STUDENT', 'TEACHER');
+
+-- CreateEnum
+CREATE TYPE "LessonType" AS ENUM ('THEORY', 'PRACTICE', 'WITH_TEACHER');
+
+-- CreateEnum
+CREATE TYPE "LessonStatus" AS ENUM ('DRAFT', 'PENDING_APPROVAL', 'APPROVED', 'COMPLETED');
+
+-- CreateEnum
+
+Файл: backend/prisma/migrations/20250622144309_add_language_to_goal/migration.sql
+---------------------------------------------------------------------------------
+-- AlterTable
+ALTER TABLE "learning_goals" ADD COLUMN     "language" TEXT NOT NULL DEFAULT 'Russian';
+
+
+Файл: backend/prisma/migrations/20250622202034_add_character_and_story_models/migration.sql
+-------------------------------------------------------------------------------------------
+[Content of file migration.sql truncated. First 10 lines:]
+-- AlterTable
+ALTER TABLE "learning_goals" ADD COLUMN     "characterGenId" TEXT,
+ADD COLUMN     "characterImageId" TEXT,
+ADD COLUMN     "characterImageUrl" TEXT,
+ADD COLUMN     "characterPrompt" TEXT;
+
+-- CreateTable
+CREATE TABLE "story_chapters" (
+    "id" TEXT NOT NULL,
+    "learningGoalId" TEXT NOT NULL,
+
+Файл: backend/prisma/migrations/20250623091331_add_image_prompt_to_story_chapter/migration.sql
+----------------------------------------------------------------------------------------------
+/*
+  Warnings:
+
+  - You are about to drop the column `studentResponseText` on the `story_chapters` table. All the data in the column will be lost.
+  - The `teacherSnippetStatus` column on the `story_chapters` table would be dropped and recreated. This will lead to data loss if there is data in the column.
+  - Added the required column `updatedAt` to the `story_chapters` table without a default value. This is not possible if the table is not empty.
+
+*/
+-- AlterTable
+ALTER TABLE "story_chapters" DROP COLUMN "studentResponseText",
+ADD COLUMN     "studentSnippetImageUrl" TEXT,
+ADD COLUMN     "studentSnippetStatus" TEXT NOT NULL DEFAULT 'LOCKED',
+ADD COLUMN     "studentSnippetText" TEXT,
+ADD COLUMN     "teacherSnippetImagePrompt" TEXT,
+ADD COLUMN     "updatedAt" TIMESTAMP(3) NOT NULL,
+ALTER COLUMN "teacherSnippetText" DROP NOT NULL,
+DROP COLUMN "teacherSnippetStatus",
+ADD COLUMN     "teacherSnippetStatus" TEXT NOT NULL DEFAULT 'DRAFT';
+
+
+Файл: backend/prisma/migrations/20250623153940_enhance_performance_log/migration.sql
+------------------------------------------------------------------------------------
+-- AlterTable
+ALTER TABLE "student_performance_logs" ADD COLUMN     "blockIndex" INTEGER,
+ADD COLUMN     "blockType" TEXT,
+ADD COLUMN     "question" TEXT;
+
+
+Файл: backend/prisma/migrations/20250623180646_make_log_fields_optional/migration.sql
+-------------------------------------------------------------------------------------
+[Content of file migration.sql truncated. First 10 lines:]
+/*
+  Warnings:
+
+  - You are about to drop the column `blockIndex` on the `student_performance_logs` table. All the data in the column will be lost.
+  - You are about to drop the column `blockType` on the `student_performance_logs` table. All the data in the column will be lost.
+  - You are about to drop the column `createdAt` on the `student_performance_logs` table. All the data in the column will be lost.
+  - You are about to drop the column `lessonId` on the `student_performance_logs` table. All the data in the column will be lost.
+  - You are about to drop the column `studentId` on the `student_performance_logs` table. All the data in the column will be lost.
+  - Added the required column `lesson_id` to the `student_performance_logs` table without a default value. This is not possible if the table is not empty.
+  - Added the required column `student_id` to the `student_performance_logs` table without a default value. This is not possible if the table is not empty.
+
+Файл: backend/prisma/migrations/20250706111311_remove_obsolete_story_model/migration.sql
+----------------------------------------------------------------------------------------
+/*
+  Warnings:
+
+  - You are about to drop the `stories` table. If the table is not empty, all the data it contains will be lost.
+
+*/
+-- DropForeignKey
+ALTER TABLE "stories" DROP CONSTRAINT "stories_learningGoalId_fkey";
+
+-- DropForeignKey
+ALTER TABLE "stories" DROP CONSTRAINT "stories_studentId_fkey";
+
+-- DropTable
+DROP TABLE "stories";
+
+
+Файл: backend/prisma/migrations/20250707120000_remove_badges/migration.sql
+--------------------------------------------------------------------------
+-- DropForeignKey
+ALTER TABLE "badges" DROP CONSTRAINT "badges_studentId_fkey";
+
+-- DropTable
+DROP TABLE "badges";
+
+-- DropEnum
+DROP TYPE "BadgeStatus";
+
+
+Файл: backend/prisma/migrations/20250708100000_add_illustration_style/migration.sql
+-----------------------------------------------------------------------------------
+-- AlterTable
+ALTER TABLE "learning_goals" ADD COLUMN "illustrationStyle" TEXT NOT NULL DEFAULT 'ILLUSTRATION';
+
+
+Файл: backend/prisma/migrations/20250719195723_add_control_work_lesson_type/migration.sql
+-----------------------------------------------------------------------------------------
+-- AlterEnum
+ALTER TYPE "LessonType" ADD VALUE 'CONTROL_WORK';
+
+
+Файл: backend/prisma/migrations/migration_lock.toml
+---------------------------------------------------
+# Please do not edit this file manually
+# It should be added in your version-control system (e.g., Git)
+provider = "postgresql"
+
+
+Файл: backend/prisma/schema.prisma
+----------------------------------
+[Content of file schema.prisma truncated. First 10 lines:]
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+
+Файл: backend/scripts/check-db.ts
+---------------------------------
+// File: check-db.ts
+// Summary of declarations:
+
+async function checkDatabase() {
+  // ... implementation
+}
+
+Файл: backend/scripts/createTestUsers.ts
+----------------------------------------
+// File: createTestUsers.ts
+// Summary of declarations:
+
+const prisma = new PrismaClient();
+
+async function main() {
+  // ... implementation
+}
+
+Файл: backend/scripts/lowercase-emails.ts
+-----------------------------------------
+// File: lowercase-emails.ts
+// Summary of declarations:
+
+const prisma = new PrismaClient();
+
+async function lowercaseEmails() {
+  // ... implementation
+}
+
+Файл: backend/src/app.ts
+------------------------
+// File: app.ts
+// Summary of declarations:
+
+interface ServerWithWebSocket extends http.Server {
+  // ... implementation
+}
+
+Файл: backend/src/config/env.ts
+-------------------------------
+// File: env.ts
+// Summary of declarations:
+
+const envVars = envSchema.safeParse(process.env);
+
+export type Config = typeof config;
+
+Файл: backend/src/controllers/auth.controller.ts
+------------------------------------------------
+// File: auth.controller.ts
+// No top-level declarations found.
+
+Файл: backend/src/controllers/character.controller.ts
+-----------------------------------------------------
+// File: character.controller.ts
+// No top-level declarations found.
+
+Файл: backend/src/controllers/chat.controller.ts
+------------------------------------------------
+// File: chat.controller.ts
+// No top-level declarations found.
+
+Файл: backend/src/controllers/goal.controller.ts
+------------------------------------------------
+// File: goal.controller.ts
+// Summary of declarations:
+
+interface CreateGoalBody {
+  // ... implementation
+}
+
+Файл: backend/src/controllers/lesson.controller.ts
+--------------------------------------------------
+// File: lesson.controller.ts
+// No top-level declarations found.
+
+Файл: backend/src/controllers/performanceLogs.controller.ts
+-----------------------------------------------------------
+// File: performanceLogs.controller.ts
+// No top-level declarations found.
+
+Файл: backend/src/controllers/roadmap.controller.ts
+---------------------------------------------------
+// File: roadmap.controller.ts
+// No top-level declarations found.
+
+Файл: backend/src/controllers/story.controller.ts
+-------------------------------------------------
+// File: story.controller.ts
+// Summary of declarations:
+
+interface Request extends ExpressRequest {
+  // ... implementation
+}
+
+Файл: backend/src/controllers/student.controller.ts
+---------------------------------------------------
+// File: student.controller.ts
+// Summary of declarations:
+
+interface Request extends ExpressRequest {
+  // ... implementation
+}
+
+Файл: backend/src/controllers/teacher.controller.ts
+---------------------------------------------------
+// File: teacher.controller.ts
+// No top-level declarations found.
+
+Файл: backend/src/db.ts
+-----------------------
+// File: db.ts
+// Summary of declarations:
+
+const prisma = global.prisma || new PrismaClient(prismaOptions);
+
+Файл: backend/src/index.ts
+--------------------------
+// File: index.ts
+// Summary of declarations:
+
+const PORT = process.env.PORT || '3002';
+
+const { server } = createServer();
+
+Файл: backend/src/middlewares/auth.middleware.ts
+------------------------------------------------
+// File: auth.middleware.ts
+// No top-level declarations found.
+
+Файл: backend/src/middlewares/teacher.middleware.ts
+---------------------------------------------------
+// File: teacher.middleware.ts
+// No top-level declarations found.
+
+Файл: backend/src/routes/auth.routes.ts
+---------------------------------------
+// File: auth.routes.ts
+// Summary of declarations:
+
+const router = Router();
+
+Файл: backend/src/routes/character.routes.ts
+--------------------------------------------
+// File: character.routes.ts
+// Summary of declarations:
+
+const router = Router();
+
+Файл: backend/src/routes/chat.routes.ts
+---------------------------------------
+// File: chat.routes.ts
+// Summary of declarations:
+
+const router = Router();
+
+Файл: backend/src/routes/goal.routes.ts
+---------------------------------------
+// File: goal.routes.ts
+// Summary of declarations:
+
+const router = Router();
+
+Файл: backend/src/routes/image.routes.ts
+----------------------------------------
+// File: image.routes.ts
+// Summary of declarations:
+
+const router = Router();
+
+Файл: backend/src/routes/lesson.routes.ts
+-----------------------------------------
+// File: lesson.routes.ts
+// Summary of declarations:
+
+const router = Router();
+
+Файл: backend/src/routes/roadmap.routes.ts
+------------------------------------------
+// File: roadmap.routes.ts
+// Summary of declarations:
+
+const router = Router();
+
+Файл: backend/src/routes/story.routes.ts
+----------------------------------------
+// File: story.routes.ts
+// Summary of declarations:
+
+const router = Router();
+
+Файл: backend/src/routes/student.routes.ts
+------------------------------------------
+// File: student.routes.ts
+// Summary of declarations:
+
+const router = Router();
+
+Файл: backend/src/routes/teacher.routes.ts
+------------------------------------------
+// File: teacher.routes.ts
+// Summary of declarations:
+
+const router = Router();
+
+Файл: backend/src/services/auth.service.ts
+------------------------------------------
+// File: auth.service.ts
+// Summary of declarations:
+
+interface SafeUser {
+  // ... implementation
+}
+
+type PrismaType = typeof Prisma;
+
+interface TokenPayload {
+  // ... implementation
+}
+
+interface AuthResponse {
+  // ... implementation
+}
+
+const loginAttempts = new Map<string, { count: number;
+
+export const login = async (email: string, password: string, ipAddress: string): Promise<{ user: SafeUser;
+
+Файл: backend/src/services/chat.service.ts
+------------------------------------------
+// File: chat.service.ts
+// No top-level declarations found.
+
+Файл: backend/src/services/gemini.service.ts
+--------------------------------------------
+// File: gemini.service.ts
+// Summary of declarations:
+
+const genAI = new GoogleGenerativeAI(config.geminiApiKey);
+
+const MODEL_NAME = "gemini-2.5-flash";
+
+const TEMP_LOW = 0.2;
+
+const TEMP_MID = 0.45;
+
+const TEMP_HIGH = 0.85;
+
+function createGeminiHistory(systemPrompt: string, chatHistory: {
+  // ... implementation
+}
+
+async function callGemini(prompt: string, temperature: number, isJson: boolean) {
+  // ... implementation
+}
+
+async function callGeminiWithChat(history: Content[], temperature: number, isJson: boolean) {
+  // ... implementation
+}
+
+Файл: backend/src/services/leonardo.service.ts
+----------------------------------------------
+// File: leonardo.service.ts
+// Summary of declarations:
+
+const LEONARDO_API_URL = 'https://cloud.leonardo.ai/api/rest/v1';
+
+export interface GenerateImageParams {
+  // ... implementation
+}
+
+export interface GenerationResult {
+  // ... implementation
+}
+
+export async function startImageGeneration(params: GenerateImageParams): Promise<{
+  // ... implementation
+}
+
+export async function uploadImageToLeonardo(filePath: string): Promise<{
+  // ... implementation
+}
+
+export async function getGenerationResult(generationId: string): Promise<GenerationResult> {
+  // ... implementation
+}
+
+export async function generateImage(params: GenerateImageParams): Promise<GenerationResult> {
+  // ... implementation
+}
+
+Файл: backend/src/services/websocket.service.ts
+-----------------------------------------------
+// File: websocket.service.ts
+// Summary of declarations:
+
+interface AuthenticatedSocket extends Socket {
+  // ... implementation
+}
+
+export class WebSocketService {
+  // ... implementation
+}
+
+Файл: backend/src/utils/errors.ts
+---------------------------------
+// File: errors.ts
+// Summary of declarations:
+
+export class AppError extends Error {
+  // ... implementation
+}
+
+Файл: backend/src/utils/fileUpload.ts
+-------------------------------------
+// File: fileUpload.ts
+// No top-level declarations found.
+
+Файл: backend/src/utils/logger.ts
+---------------------------------
+// File: logger.ts
+// Summary of declarations:
+
+const { combine, timestamp, printf, colorize, errors } = format;
+
+Файл: backend/start.sh
+----------------------
+#!/bin/sh
+# This script ensures the server restarts automatically after a crash.
+
+while true; do
+  echo "[Auto-Restart] Starting Node.js server..."
+  # We run the command that directly starts the node process
+  node dist/index.js
+  echo "[Auto-Restart] Server process exited with code $?. Restarting in 3 seconds..."
+  sleep 3
+done
+
+
+Файл: backend/tsconfig.json
+---------------------------
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "commonjs",
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "moduleResolution": "node",
+    "resolveJsonModule": true
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "**/*.test.ts"]
+}
+
+
+Файл: frontend/index.html
+-------------------------
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#4f46e5" />
+    <title>Math Quest</title>
+    <base href="/" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+
+[... content truncated ...]
+
+        }
+      });
+    </script>
+  </body>
+</html>
+
+Файл: frontend/package.json
+---------------------------
+{
+  "name": "frontend",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
+    "preview": "vite preview"
+
+[... content truncated ...]
+
+    "tailwindcss": "^3.4.1",
+    "typescript": "^5.4.2",
+    "vite": "^5.1.6"
+  }
+}
+
+Файл: frontend/postcss.config.js
+--------------------------------
+// File: postcss.config.js
+// No top-level declarations found.
+
+Файл: frontend/src/App.tsx
+--------------------------
+// File: App.tsx
+// Summary of declarations:
+
+function App() {
+  // ... implementation
+}
+
+Файл: frontend/src/AuthInitializer.tsx
+--------------------------------------
+// File: AuthInitializer.tsx
+// No top-level declarations found.
+
+Файл: frontend/src/app/api/apiSlice.ts
+--------------------------------------
+// File: apiSlice.ts
+// No top-level declarations found.
+
+Файл: frontend/src/app/api/axiosBaseQuery.ts
+--------------------------------------------
+// File: axiosBaseQuery.ts
+// No top-level declarations found.
+
+Файл: frontend/src/app/hooks/index.ts
+-------------------------------------
+// File: index.ts
+// No top-level declarations found.
+
+Файл: frontend/src/app/hooks/useAppDispatch.ts
+----------------------------------------------
+// File: useAppDispatch.ts
+// Summary of declarations:
+
+type TypedDispatch = ThunkDispatch<RootState, unknown, UnknownAction>;
+
+export const useAppDispatch = (): TypedDispatch => useDispatch<TypedDispatch>();
+
+Файл: frontend/src/app/hooks/useAppSelector.ts
+----------------------------------------------
+// File: useAppSelector.ts
+// Summary of declarations:
+
+export const useAppSelector: TypedUseSelectorHook<RootState> = useSelector;
+
+Файл: frontend/src/app/store.ts
+-------------------------------
+// File: store.ts
+// Summary of declarations:
+
+export type RootState = ReturnType<typeof store.getState>;
+
+export type AppDispatch = typeof store.dispatch;
+
+Файл: frontend/src/components/common/Layout.tsx
+-----------------------------------------------
+// File: Layout.tsx
+// Summary of declarations:
+
+interface NavigationItem {
+  // ... implementation
+}
+
+function getStudentNavigation(t: (key: string) => string): NavigationItem[] {
+  // ... implementation
+}
+
+function getTeacherNavigation(t: (key: string) => string): NavigationItem[] {
+  // ... implementation
+}
+
+function classNames(...classes: (string | boolean | undefined)[]): string {
+  // ... implementation
+}
+
+Файл: frontend/src/components/common/Spinner.tsx
+------------------------------------------------
+// File: Spinner.tsx
+// Summary of declarations:
+
+type SpinnerSize = 'sm' | 'md' | 'lg';
+
+interface SpinnerProps {
+  // ... implementation
+}
+
+Файл: frontend/src/components/common/WebSocketManager.tsx
+---------------------------------------------------------
+// File: WebSocketManager.tsx
+// No top-level declarations found.
+
+Файл: frontend/src/components/icons/index.ts
+--------------------------------------------
+// File: index.ts
+// No top-level declarations found.
+
+Файл: frontend/src/context/SocketContext.tsx
+--------------------------------------------
+// File: SocketContext.tsx
+// Summary of declarations:
+
+export const SocketContext = createContext<Socket | null>(null);
+
+Файл: frontend/src/features/auth/authApi.ts
+-------------------------------------------
+// File: authApi.ts
+// No top-level declarations found.
+
+Файл: frontend/src/features/auth/authSlice.ts
+---------------------------------------------
+// File: authSlice.ts
+// Summary of declarations:
+
+export interface AuthState {
+  // ... implementation
+}
+
+const storedUserItem = localStorage.getItem('user');
+
+const initialUser: User | null = storedUserItem ? JSON.parse(storedUserItem) : null;
+
+const storedToken = localStorage.getItem('token');
+
+export const { logout, setUser } = authSlice.actions;
+
+export const selectCurrentUser = (state: RootState) => state.auth.user;
+
+export const selectCurrentToken = (state: RootState) => state.auth.token;
+
+export const selectIsAuthenticated = (state: RootState) => state.auth.isAuthenticated;
+
+Файл: frontend/src/features/chat/Chat.tsx
+-----------------------------------------
+// File: Chat.tsx
+// Summary of declarations:
+
+interface ChatUser {
+  // ... implementation
+}
+
+Файл: frontend/src/features/chat/chatApi.ts
+-------------------------------------------
+// File: chatApi.ts
+// Summary of declarations:
+
+type UnreadSummaryResponse = Record<string, number>;
+
+export const { useGetUnreadSummaryQuery, useLazyGetUnreadSummaryQuery } = chatApi;
+
+Файл: frontend/src/features/chat/chatSlice.ts
+---------------------------------------------
+// File: chatSlice.ts
+// Summary of declarations:
+
+export interface ChatState {
+  // ... implementation
+}
+
+const selectMessages = (state: RootState) => state.chat.messagesByPartnerId;
+
+const selectActivePartnerId = (state: RootState) => state.chat.activeChatPartnerId;
+
+Файл: frontend/src/features/goal/goalApi.ts
+-------------------------------------------
+// File: goalApi.ts
+// No top-level declarations found.
+
+Файл: frontend/src/features/lesson/lessonApi.ts
+-----------------------------------------------
+// File: lessonApi.ts
+// Summary of declarations:
+
+export interface GenerationResult {
+  // ... implementation
+}
+
+Файл: frontend/src/features/student/adventureSlice.ts
+-----------------------------------------------------
+// File: adventureSlice.ts
+// Summary of declarations:
+
+export interface AdventureState {
+  // ... implementation
+}
+
+export const selectAdventure = (state: RootState) => state.adventure;
+
+export const selectPracticeAnswers = (state: RootState) => state.adventure.practiceAnswers;
+
+export const selectStoryResponse = (state: RootState) => state.adventure.storyResponse;
+
+Файл: frontend/src/features/student/studentApi.ts
+-------------------------------------------------
+// File: studentApi.ts
+// Summary of declarations:
+
+interface SubmitLessonApiPayload {
+  // ... implementation
+}
+
+Файл: frontend/src/features/teacher/StudentsPage.tsx
+----------------------------------------------------
+// File: StudentsPage.tsx
+// Summary of declarations:
+
+interface ConnectStudentForm {
+  // ... implementation
+}
+
+Файл: frontend/src/features/teacher/teacherApi.ts
+-------------------------------------------------
+// File: teacherApi.ts
+// No top-level declarations found.
+
+Файл: frontend/src/i18n.ts
+--------------------------
+// File: i18n.ts
+// Summary of declarations:
+
+const savedLanguage = localStorage.getItem('i18nextLng') || 'ru';
+
+Файл: frontend/src/index.css
+----------------------------
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --brand-600: #4f46e5; /* indigo-600 */
+    --brand-500: #6366f1; /* indigo-500 */
+    --brand-400: #818cf8; /* indigo-400 */
+
+
+[... content truncated ...]
+
+}
+
+.animate-float {
+  animation: float 6s ease-in-out infinite;
+}
+
+Файл: frontend/src/locales/en/translation.json
+----------------------------------------------
+{
+  "studentDashboard": {
+    "loadingError": "Error loading data. Please try again later.",
+    "welcome": "Welcome, {{name}}!",
+    "student": "Student",
+    "quickAccess": "Quick Access",
+    "continueAdventure": "Continue Adventure",
+    "returnToLastLesson": "Return to the last lesson",
+    "chatWithTeacher": "Chat with Teacher",
+    "askQuestion": "Ask a question or get help",
+
+[... content truncated ...]
+
+  },
+  "common": {
+    "notImplemented": "This feature is not implemented yet."
+  }
+}
+
+Файл: frontend/src/locales/ru/translation.json
+----------------------------------------------
+{
+  "studentDashboard": {
+    "loadingError": "Ошибка загрузки данных. Пожалуйста, попробуйте позже.",
+    "welcome": "Добро пожаловать, {{name}}!",
+    "student": "Студент",
+    "quickAccess": "Быстрый доступ",
+    "continueAdventure": "Продолжить приключение",
+    "returnToLastLesson": "Вернуться к последнему уроку",
+    "chatWithTeacher": "Чат с учителем",
+    "askQuestion": "Задать вопрос или получить помощь",
+
+[... content truncated ...]
+
+    "registerSuccess": "Регистрация успешна! Перенаправляем...",
+    "registerFailedDefault": "Не удалось зарегистрироваться. Попробуйте ещё раз."
+  }
+  
+}
+
+Файл: frontend/src/main.tsx
+---------------------------
+// File: main.tsx
+// No top-level declarations found.
+
+Файл: frontend/src/pages/HomePage.tsx
+-------------------------------------
+// File: HomePage.tsx
+// No top-level declarations found.
+
+Файл: frontend/src/pages/LoginPage.tsx
+--------------------------------------
+// File: LoginPage.tsx
+// Summary of declarations:
+
+type LoginFormData = z.infer<typeof loginSchema>;
+
+Файл: frontend/src/pages/NotFoundPage.tsx
+-----------------------------------------
+// File: NotFoundPage.tsx
+// No top-level declarations found.
+
+Файл: frontend/src/pages/RegisterPage.tsx
+-----------------------------------------
+// File: RegisterPage.tsx
+// Summary of declarations:
+
+type RegisterFormData = z.infer<typeof registerSchema>;
+
+Файл: frontend/src/pages/chat/ChatPage.tsx
+------------------------------------------
+// File: ChatPage.tsx
+// No top-level declarations found.
+
+Файл: frontend/src/pages/student/CompletedLessonsPage.tsx
+---------------------------------------------------------
+// File: CompletedLessonsPage.tsx
+// No top-level declarations found.
+
+Файл: frontend/src/pages/student/StoryHistoryPage.tsx
+-----------------------------------------------------
+// File: StoryHistoryPage.tsx
+// No top-level declarations found.
+
+Файл: frontend/src/pages/student/StudentAdventurePage.tsx
+---------------------------------------------------------
+// File: StudentAdventurePage.tsx
+// Summary of declarations:
+
+const SummaryModal = ({ isOpen, onClose, summary, isLoading }: { isOpen: boolean;
+
+type LessonPhase = 'content' | 'assessment' | 'story' | 'control_work';
+
+type ChatMessage = { role: 'user' | 'assistant', content: string };
+
+Файл: frontend/src/pages/student/StudentDashboard.tsx
+-----------------------------------------------------
+// File: StudentDashboard.tsx
+// No top-level declarations found.
+
+Файл: frontend/src/pages/student/StudentStoriesListPage.tsx
+-----------------------------------------------------------
+// File: StudentStoriesListPage.tsx
+// No top-level declarations found.
+
+Файл: frontend/src/pages/teacher/CreateGoalPage.tsx
+---------------------------------------------------
+// File: CreateGoalPage.tsx
+// Summary of declarations:
+
+interface CreateGoalFormData {
+  // ... implementation
+}
+
+Файл: frontend/src/pages/teacher/LearningGoalsListPage.tsx
+----------------------------------------------------------
+// File: LearningGoalsListPage.tsx
+// No top-level declarations found.
+
+Файл: frontend/src/pages/teacher/LessonEditorModal.tsx
+------------------------------------------------------
+// File: LessonEditorModal.tsx
+// Summary of declarations:
+
+const Lightbox = ({ src, onClose }: { src: string;
+
+function classNames(...classes: (string | boolean)[]) {
+  // ... implementation
+}
+
+Файл: frontend/src/pages/teacher/RoadmapEditorPage.tsx
+------------------------------------------------------
+// File: RoadmapEditorPage.tsx
+// Summary of declarations:
+
+interface PerformanceLog {
+  // ... implementation
+}
+
+interface ChatMessage {
+  // ... implementation
+}
+
+interface RoadmapEditorContext {
+  // ... implementation
+}
+
+Файл: frontend/src/pages/teacher/TeacherDashboard.tsx
+-----------------------------------------------------
+// File: TeacherDashboard.tsx
+// No top-level declarations found.
+
+Файл: frontend/src/pages/teacher/components/CharacterEditor.tsx
+---------------------------------------------------------------
+// File: CharacterEditor.tsx
+// Summary of declarations:
+
+interface CharacterEditorProps {
+  // ... implementation
+}
+
+const Lightbox = ({ src, onClose }: { src: string;
+
+Файл: frontend/src/pages/teacher/components/ControlWorkContentEditor.tsx
+------------------------------------------------------------------------
+// File: ControlWorkContentEditor.tsx
+// Summary of declarations:
+
+interface LessonContentBlock {
+  // ... implementation
+}
+
+interface ChatMessage {
+  // ... implementation
+}
+
+interface ControlWorkContentEditorProps {
+  // ... implementation
+}
+
+Файл: frontend/src/pages/teacher/components/LessonContentEditor.tsx
+-------------------------------------------------------------------
+// File: LessonContentEditor.tsx
+// Summary of declarations:
+
+interface LessonContentBlock {
+  // ... implementation
+}
+
+interface ChatMessage {
+  // ... implementation
+}
+
+interface LessonContentEditorProps {
+  // ... implementation
+}
+
+Файл: frontend/src/pages/teacher/components/LessonStatusIndicator.tsx
+---------------------------------------------------------------------
+// File: LessonStatusIndicator.tsx
+// No top-level declarations found.
+
+Файл: frontend/src/pages/teacher/components/LessonStoryEditor.tsx
+-----------------------------------------------------------------
+// File: LessonStoryEditor.tsx
+// Summary of declarations:
+
+interface LessonStoryEditorProps {
+  // ... implementation
+}
+
+Файл: frontend/src/pages/teacher/components/RoadmapSection.tsx
+--------------------------------------------------------------
+// File: RoadmapSection.tsx
+// Summary of declarations:
+
+interface RoadmapSectionProps {
+  // ... implementation
+}
+
+function classNames(...classes: (string | boolean | undefined)[]) {
+  // ... implementation
+}
+
+Файл: frontend/src/types/models.ts
+----------------------------------
+// File: models.ts
+// Summary of declarations:
+
+export type UserRole = 'student' | 'teacher';
+
+export interface User {
+  // ... implementation
+}
+
+export interface StudentInfo {
+  // ... implementation
+}
+
+export interface StudentProfile extends User {
+  // ... implementation
+}
+
+export interface LearningGoal {
+  // ... implementation
+}
+
+export interface ContentSection {
+  // ... implementation
+}
+
+export type LessonType = 'THEORY' | 'PRACTICE' | 'WITH_TEACHER' | 'CONTROL_WORK';
+
+export interface Lesson {
+  // ... implementation
+}
+
+export interface StoryChapter {
+  // ... implementation
+}
+
+export interface StoryChapterHistory extends StoryChapter {
+  // ... implementation
+}
+
+export interface PerformanceLog {
+  // ... implementation
+}
+
+export interface RoadmapProposal {
+  // ... implementation
+}
+
+export interface OldRoadmapProposal {
+  // ... implementation
+}
+
+export interface SubmitLessonPayload {
+  // ... implementation
+}
+
+export interface AIAssessmentResponse {
+  // ... implementation
+}
+
+Файл: frontend/src/types/websocket.ts
+-------------------------------------
+// File: websocket.ts
+// Summary of declarations:
+
+export interface StudentSubmittedLessonEvent {
+  // ... implementation
+}
+
+export interface TeacherReviewedLessonEvent {
+  // ... implementation
+}
+
+export interface StudentRequestedReviewEvent {
+  // ... implementation
+}
+
+Файл: frontend/src/vite-env.d.ts
+--------------------------------
+// File: vite-env.d.ts
+// Summary of declarations:
+
+interface ImportMetaEnv {
+  // ... implementation
+}
+
+interface ImportMeta {
+  // ... implementation
+}
+
+Файл: frontend/tailwind.config.js
+---------------------------------
+// File: tailwind.config.js
+// No top-level declarations found.
+
+Файл: frontend/tsconfig.json
+----------------------------
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "useDefineForClassFields": true,
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+    "noEmit": true,
+    "moduleResolution": "node",
+    "resolveJsonModule": true,
+
+[... content truncated ...]
+
+  },
+  "include": ["src"],
+  "exclude": ["node_modules", "dist"],
+  "references": [{ "path": "./tsconfig.node.json" }]
+}
+
+Файл: frontend/tsconfig.node.json
+---------------------------------
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "composite": true,
+    "module": "esnext",
+    "moduleResolution": "node",
+    "target": "ESNext",
+    "types": ["node"],
+    "allowSyntheticDefaultImports": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "strict": true,
+    "noEmit": false
+  },
+  "include": ["vite.config.ts", "plugins/spa-fallback.ts", "vite-spa-fallback.ts"],
+  "exclude": ["node_modules", "dist", "**/*.test.ts"]
+}
+
+
+Файл: frontend/vite.config.ts
+-----------------------------
+// File: vite.config.ts
+// Summary of declarations:
+
+const __filename = fileURLToPath(import.meta.url);
+
+const __dirname = resolve(__filename, '..');
+
+Файл: package.json
+------------------
+{
+  "name": "math-quest",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently \"npm run backend:dev\" \"npm run frontend:dev\"",
+    "backend:dev": "cd backend && npm run dev",
+    "frontend:dev": "cd frontend && npm run dev",
+    "install:all": "npm install && cd backend && npm install && cd ../frontend && npm install",
+    "build": "cd backend && npm run build && cd ../frontend && npm run build",
+
+[... content truncated ...]
+
+  },
+  "prisma": {
+    "schema": "backend/prisma/schema.prisma"
+  }
+}
+--- КОНЕЦ КОНТЕКСТА ---
+
+--- ЗАДАЧА ПОЛЬЗОВАТЕЛЯ ---
+Научи меня пожалуйста как запускать этот проект, кажется там был специальный файл для запуска, как запустить чтобы все работало, желательно самый быстрый и простой способ
+--- КОНЕЦ ЗАДАЧИ ---
+
+Проанализируй задачу и контекст. Следуй правилам этапа планирования.
+
+
+================================================================================
+ОТВЕТ (Состояние: PLANNING, Итерация: 0)
+--------------------------------------------------------------------------------
+```plan
+Задача понятна. Пользователь хочет узнать, как запустить проект. Самый простой и правильный способ — создать файл `README.md` с инструкциями по установке и запуску. Это будет постоянным руководством для пользователя и других разработчиков.
+
+**План:**
+
+1.  Создать файл `README.md` в корне проекта.
+2.  Добавить в `README.md` исчерпывающие инструкции, которые включают:
+    *   Необходимые условия для запуска (Node.js, npm, PostgreSQL).
+    *   Порядок установки зависимостей с помощью команды `npm run install:all` из корневой директории.
+    *   Инструкцию по настройке файла окружения `.env` для бэкенда.
+    *   Команду для применения миграций базы данных: `npm run prisma:migrate`.
+    *   Основную команду для запуска проекта в режиме разработки: `npm run dev`.
+
+Цель — предоставить пользователю единый документ, к которому он сможет обращаться для запуска проекта.
+```
+```files
+README.md
+```
+
+================================================================================
+ЗАПРОС (Состояние: EXECUTION, Итерация: 1)
+--------------------------------------------------------------------------------
+
+Ты — AI-ассистент в автоматизированной системе. Твоя задача — анализировать код и генерировать команды для его изменения.
+
+**ПРАВИЛА ЭТАПА ИСПОЛНЕНИЯ:**
+
+1.  **ПРАВИЛО №1: ТОЛЬКО `write_file`**
+    *   Для **создания НОВЫХ** или **изменения СУЩЕСТВУЮЩИХ** файлов ты **ОБЯЗАН** использовать **только** блок ```write_file```.
+    *   Этот блок полностью перезаписывает файл.
+
+2.  **ПРАВИЛО №2: ПОЛНОТА КОДА (КРИТИЧЕСКИ ВАЖНО!)**
+    *   Внутри блока ```write_file``` ты должен предоставить **ПОЛНОЕ СОДЕРЖИМОЕ** файла от первой до последней строчки.
+    *   **КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО** использовать плейсхолдеры, многоточия (`...`), комментарии (`// ... остальной код`) или любые другие способы сокращения кода.
+
+3.  **Формат Ответа:**
+    *   **Действия:** Твой ответ **ОБЯЗАН** содержать ОДИН из блоков действий и СРАЗУ ПОСЛЕ него блок `summary`:
+        1.  **Для команд терминала:** ```bash ... ```.
+        2.  **Для СОЗДАНИЯ/ИЗМЕНЕНИЯ файла:** ```write_file path/to/file.py ... ```.
+    *   **Завершение:** Если задача решена, напиши **только** `ГОТОВО`, затем блок ```done_summary ... ```. Для ручных шагов добавь блок ```manual```.
+
+
+**ГЛОБАЛЬНЫЕ ПРАВИЛА (ОБЯЗАТЕЛЬНЫ К ИСПОЛНЕНИЮ):**
+
+1.  **ПРАВИЛО ПУТЕЙ (САМОЕ ВАЖНОЕ!):**
+    *   Все пути к файлам, которые ты используешь (в блоках `files`, `write_file`, `bash`), ДОЛЖНЫ быть **относительными от корня проекта**.
+    *   **КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО** начинать путь с имени корневой папки проекта. Система автоматически работает из корня проекта.
+    *   **Пример:** Если проект находится в папке `/path/to/my-project`, и тебе нужен файл `src/app.js`:
+        *   **ПРАВИЛЬНО:** `src/app.js`
+        *   **НЕПРАВИЛЬНО:** `my-project/src/app.js`
+
+2.  **Рабочая Директория:** Все команды выполняются из **корня проекта**. **ЗАПРЕЩЕНО** использовать `cd`.
+
+3.  **Разрешенные Команды:** `rm, mv, touch, mkdir, npm, npx, yarn, pnpm, git, echo, ./`. Команды, не входящие в этот список, должны быть помещены в блок ```manual```.
+
+4.  **Фокус и Прагматизм:** Твоя главная цель — решить **исходную задачу** пользователя. Не занимайся перфекционизмом: не исправляй стиль кода и не делай рефакторинг, не связанный с задачей.
+
+
+**Формат write_file с BOUNDARY (обязателен):**
+```write_file path="path/to/file" boundary="SLOTH_BOUNDARY_070162a1463b4766a0640e529949ed46"
+<любой контент файла, в т.ч. с внутренними ```
+ и ```bash блоками>
+SLOTH_BOUNDARY_070162a1463b4766a0640e529949ed46
+
+Последняя строка ПЕРЕД закрывающим ``` — ровно SLOTH_BOUNDARY_070162a1463b4766a0640e529949ed46.
+
+
+
+--- КОНТЕКСТ ПРОЕКТА (ПОЛНЫЙ ИЛИ ЧАСТИЧНЫЙ) ---
+Сейчас я выгружу контекст проекта: сначала дерево файлов с размерами в символах, а потом их содержимое.
+
+--- Структура проекта ---
+tutor-game-new/
+├── frontend/
+│   ├── src/
+│   │   ├── types/
+│   │   │   ├── models.ts (2928 chars)
+│   │   │   └── websocket.ts (739 chars)
+│   │   ├── context/
+│   │   │   └── SocketContext.tsx (541 chars)
+│   │   ├── locales/
+│   │   │   ├── ru/
+│   │   │   │   └── translation.json (16998 chars)
+│   │   │   └── en/
+│   │   │       └── translation.json (16324 chars)
+│   │   ├── app/
+│   │   │   ├── hooks/
+│   │   │   │   ├── index.ts (106 chars)
+│   │   │   │   ├── useAppDispatch.ts (305 chars)
+│   │   │   │   └── useAppSelector.ts (185 chars)
+│   │   │   ├── api/
+│   │   │   │   ├── apiSlice.ts (418 chars)
+│   │   │   │   └── axiosBaseQuery.ts (1500 chars)
+│   │   │   └── store.ts (801 chars)
+│   │   ├── features/
+│   │   │   ├── chat/
+│   │   │   │   ├── Chat.tsx (6539 chars)
+│   │   │   │   ├── chatApi.ts (601 chars)
+│   │   │   │   └── chatSlice.ts (2844 chars)
+│   │   │   ├── auth/
+│   │   │   │   ├── authApi.ts (4588 chars)
+│   │   │   │   └── authSlice.ts (3370 chars)
+│   │   │   ├── student/
+│   │   │   │   ├── adventureSlice.ts (1773 chars)
+│   │   │   │   └── studentApi.ts (3518 chars)
+│   │   │   ├── lesson/
+│   │   │   │   └── lessonApi.ts (4505 chars)
+│   │   │   ├── teacher/
+│   │   │   │   ├── StudentsPage.tsx (5798 chars)
+│   │   │   │   └── teacherApi.ts (2085 chars)
+│   │   │   └── goal/
+│   │   │       └── goalApi.ts (6184 chars)
+│   │   ├── components/
+│   │   │   ├── common/
+│   │   │   │   ├── Layout.tsx (18081 chars)
+│   │   │   │   ├── Spinner.tsx (645 chars)
+│   │   │   │   └── WebSocketManager.tsx (7900 chars)
+│   │   │   └── icons/
+│   │   │       └── index.ts (150 chars)
+│   │   ├── pages/
+│   │   │   ├── chat/
+│   │   │   │   └── ChatPage.tsx (933 chars)
+│   │   │   ├── student/
+│   │   │   │   ├── CompletedLessonsPage.tsx (5904 chars)
+│   │   │   │   ├── StoryHistoryPage.tsx (4448 chars)
+│   │   │   │   ├── !!!StudentAdventurePage.tsx (27808 chars)
+│   │   │   │   ├── StudentDashboard.tsx (4404 chars)
+│   │   │   │   └── StudentStoriesListPage.tsx (2645 chars)
+│   │   │   ├── teacher/
+│   │   │   │   ├── components/
+│   │   │   │   │   ├── CharacterEditor.tsx (8637 chars)
+│   │   │   │   │   ├── ControlWorkContentEditor.tsx (7310 chars)
+│   │   │   │   │   ├── LessonContentEditor.tsx (10291 chars)
+│   │   │   │   │   ├── LessonStatusIndicator.tsx (1296 chars)
+│   │   │   │   │   ├── LessonStoryEditor.tsx (11097 chars)
+│   │   │   │   │   └── RoadmapSection.tsx (12172 chars)
+│   │   │   │   ├── CreateGoalPage.tsx (6966 chars)
+│   │   │   │   ├── LearningGoalsListPage.tsx (3367 chars)
+│   │   │   │   ├── LessonEditorModal.tsx (7587 chars)
+│   │   │   │   ├── !!!RoadmapEditorPage.tsx (19768 chars)
+│   │   │   │   └── TeacherDashboard.tsx (2032 chars)
+│   │   │   ├── HomePage.tsx (6282 chars)
+│   │   │   ├── LoginPage.tsx (6482 chars)
+│   │   │   ├── NotFoundPage.tsx (1517 chars)
+│   │   │   └── RegisterPage.tsx (10655 chars)
+│   │   ├── App.tsx (4010 chars)
+│   │   ├── AuthInitializer.tsx (1937 chars)
+│   │   ├── i18n.ts (866 chars)
+│   │   ├── index.css (10114 chars)
+│   │   ├── main.tsx (687 chars)
+│   │   └── vite-env.d.ts (204 chars)
+│   ├── index.html (1033 chars)
+│   ├── package.json (1303 chars)
+│   ├── postcss.config.js (80 chars)
+│   ├── tailwind.config.js (3081 chars)
+│   ├── tsconfig.json (793 chars)
+│   ├── tsconfig.node.json (511 chars)
+│   └── vite.config.ts (1373 chars)
+├── backend/
+│   ├── prisma/
+│   │   ├── migrations/
+│   │   │   ├── 20250622134108_final_schema_update/
+│   │   │   │   └── migration.sql (7197 chars)
+│   │   │   ├── 20250706111311_remove_obsolete_story_model/
+│   │   │   │   └── migration.sql (339 chars)
+│   │   │   ├── 20250622202034_add_character_and_story_models/
+│   │   │   │   └── migration.sql (1121 chars)
+│   │   │   ├── 20250708100000_add_illustration_style/
+│   │   │   │   └── migration.sql (112 chars)
+│   │   │   ├── 20250623091331_add_image_prompt_to_story_chapter/
+│   │   │   │   └── migration.sql (945 chars)
+│   │   │   ├── 20250622144309_add_language_to_goal/
+│   │   │   │   └── migration.sql (102 chars)
+│   │   │   ├── 20250707120000_remove_badges/
+│   │   │   │   └── migration.sql (153 chars)
+│   │   │   ├── 20250623153940_enhance_performance_log/
+│   │   │   │   └── migration.sql (155 chars)
+│   │   │   ├── 20250623180646_make_log_fields_optional/
+│   │   │   │   └── migration.sql (2078 chars)
+│   │   │   ├── 20250719195723_add_control_work_lesson_type/
+│   │   │   │   └── migration.sql (63 chars)
+│   │   │   └── migration_lock.toml (128 chars)
+│   │   └── schema.prisma (6235 chars)
+│   ├── scripts/
+│   │   ├── check-db.ts (817 chars)
+│   │   ├── createTestUsers.ts (4550 chars)
+│   │   └── lowercase-emails.ts (2380 chars)
+│   ├── src/
+│   │   ├── config/
+│   │   │   └── env.ts (2623 chars)
+│   │   ├── middlewares/
+│   │   │   ├── auth.middleware.ts (1266 chars)
+│   │   │   └── teacher.middleware.ts (937 chars)
+│   │   ├── utils/
+│   │   │   ├── errors.ts (1236 chars)
+│   │   │   ├── fileUpload.ts (1807 chars)
+│   │   │   └── logger.ts (2445 chars)
+│   │   ├── controllers/
+│   │   │   ├── auth.controller.ts (9772 chars)
+│   │   │   ├── character.controller.ts (6168 chars)
+│   │   │   ├── chat.controller.ts (905 chars)
+│   │   │   ├── goal.controller.ts (5466 chars)
+│   │   │   ├── lesson.controller.ts (5886 chars)
+│   │   │   ├── performanceLogs.controller.ts (1519 chars)
+│   │   │   ├── roadmap.controller.ts (6124 chars)
+│   │   │   ├── story.controller.ts (13301 chars)
+│   │   │   ├── student.controller.ts (16801 chars)
+│   │   │   └── teacher.controller.ts (3101 chars)
+│   │   ├── routes/
+│   │   │   ├── auth.routes.ts (674 chars)
+│   │   │   ├── character.routes.ts (779 chars)
+│   │   │   ├── chat.routes.ts (452 chars)
+│   │   │   ├── goal.routes.ts (770 chars)
+│   │   │   ├── image.routes.ts (466 chars)
+│   │   │   ├── lesson.routes.ts (715 chars)
+│   │   │   ├── roadmap.routes.ts (554 chars)
+│   │   │   ├── story.routes.ts (956 chars)
+│   │   │   ├── student.routes.ts (1482 chars)
+│   │   │   └── teacher.routes.ts (951 chars)
+│   │   ├── services/
+│   │   │   ├── auth.service.ts (8499 chars)
+│   │   │   ├── chat.service.ts (1691 chars)
+│   │   │   ├── !!!gemini.service.ts (22583 chars)
+│   │   │   ├── leonardo.service.ts (6637 chars)
+│   │   │   └── websocket.service.ts (7143 chars)
+│   │   ├── app.ts (4619 chars)
+│   │   ├── db.ts (895 chars)
+│   │   └── index.ts (912 chars)
+│   ├── .env (1473 chars)
+│   ├── .env.example (505 chars)
+│   ├── package.json (1430 chars)
+│   ├── start.sh (332 chars)
+│   └── tsconfig.json (386 chars)
+├── package.json (1191 chars)
+└── sloth_plan.txt (871 chars)
+
+--- Содержимое файлов ---
+
+Файл: backend/.env
+------------------
+[Content of file .env truncated. First 10 lines:]
+# tutor-game/backend/.env
+
+# --- Server Configuration ---
+NODE_ENV=development
+PORT=3002
+
+# --- Database Configuration ---
+# URL для подключения к твоей локальной базе данных PostgreSQL
+DATABASE_URL="postgresql://vladimirdoronin@localhost:5432/tutor_game?schema=public"
+
+
+Файл: backend/.env.example
+--------------------------
+[Content of file .env.example truncated. First 10 lines:]
+# Server Configuration
+PORT=3001
+NODE_ENV=development
+
+# JWT Configuration
+JWT_SECRET=your_jwt_secret_key_here
+JWT_EXPIRES_IN=7d
+
+# Database Configuration
+DATABASE_URL=postgresql://username:password@localhost:5432/math_quest?schema=public
+
+Файл: backend/package.json
+--------------------------
+{
+  "name": "backend",
+  "version": "1.0.0",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
+    "start": "./start.sh",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev",
+
+[... content truncated ...]
+
+    "prisma": "^6.8.2",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^5.0.0"
+  }
+}
+
+Файл: backend/prisma/migrations/20250622134108_final_schema_update/migration.sql
+--------------------------------------------------------------------------------
+[Content of file migration.sql truncated. First 10 lines:]
+-- CreateEnum
+CREATE TYPE "Role" AS ENUM ('STUDENT', 'TEACHER');
+
+-- CreateEnum
+CREATE TYPE "LessonType" AS ENUM ('THEORY', 'PRACTICE', 'WITH_TEACHER');
+
+-- CreateEnum
+CREATE TYPE "LessonStatus" AS ENUM ('DRAFT', 'PENDING_APPROVAL', 'APPROVED', 'COMPLETED');
+
+-- CreateEnum
+
+Файл: backend/prisma/migrations/20250622144309_add_language_to_goal/migration.sql
+---------------------------------------------------------------------------------
+-- AlterTable
+ALTER TABLE "learning_goals" ADD COLUMN     "language" TEXT NOT NULL DEFAULT 'Russian';
+
+
+Файл: backend/prisma/migrations/20250622202034_add_character_and_story_models/migration.sql
+-------------------------------------------------------------------------------------------
+[Content of file migration.sql truncated. First 10 lines:]
+-- AlterTable
+ALTER TABLE "learning_goals" ADD COLUMN     "characterGenId" TEXT,
+ADD COLUMN     "characterImageId" TEXT,
+ADD COLUMN     "characterImageUrl" TEXT,
+ADD COLUMN     "characterPrompt" TEXT;
+
+-- CreateTable
+CREATE TABLE "story_chapters" (
+    "id" TEXT NOT NULL,
+    "learningGoalId" TEXT NOT NULL,
+
+Файл: backend/prisma/migrations/20250623091331_add_image_prompt_to_story_chapter/migration.sql
+----------------------------------------------------------------------------------------------
+/*
+  Warnings:
+
+  - You are about to drop the column `studentResponseText` on the `story_chapters` table. All the data in the column will be lost.
+  - The `teacherSnippetStatus` column on the `story_chapters` table would be dropped and recreated. This will lead to data loss if there is data in the column.
+  - Added the required column `updatedAt` to the `story_chapters` table without a default value. This is not possible if the table is not empty.
+
+*/
+-- AlterTable
+ALTER TABLE "story_chapters" DROP COLUMN "studentResponseText",
+ADD COLUMN     "studentSnippetImageUrl" TEXT,
+ADD COLUMN     "studentSnippetStatus" TEXT NOT NULL DEFAULT 'LOCKED',
+ADD COLUMN     "studentSnippetText" TEXT,
+ADD COLUMN     "teacherSnippetImagePrompt" TEXT,
+ADD COLUMN     "updatedAt" TIMESTAMP(3) NOT NULL,
+ALTER COLUMN "teacherSnippetText" DROP NOT NULL,
+DROP COLUMN "teacherSnippetStatus",
+ADD COLUMN     "teacherSnippetStatus" TEXT NOT NULL DEFAULT 'DRAFT';
+
+
+Файл: backend/prisma/migrations/20250623153940_enhance_performance_log/migration.sql
+------------------------------------------------------------------------------------
+-- AlterTable
+ALTER TABLE "student_performance_logs" ADD COLUMN     "blockIndex" INTEGER,
+ADD COLUMN     "blockType" TEXT,
+ADD COLUMN     "question" TEXT;
+
+
+Файл: backend/prisma/migrations/20250623180646_make_log_fields_optional/migration.sql
+-------------------------------------------------------------------------------------
+[Content of file migration.sql truncated. First 10 lines:]
+/*
+  Warnings:
+
+  - You are about to drop the column `blockIndex` on the `student_performance_logs` table. All the data in the column will be lost.
+  - You are about to drop the column `blockType` on the `student_performance_logs` table. All the data in the column will be lost.
+  - You are about to drop the column `createdAt` on the `student_performance_logs` table. All the data in the column will be lost.
+  - You are about to drop the column `lessonId` on the `student_performance_logs` table. All the data in the column will be lost.
+  - You are about to drop the column `studentId` on the `student_performance_logs` table. All the data in the column will be lost.
+  - Added the required column `lesson_id` to the `student_performance_logs` table without a default value. This is not possible if the table is not empty.
+  - Added the required column `student_id` to the `student_performance_logs` table without a default value. This is not possible if the table is not empty.
+
+Файл: backend/prisma/migrations/20250706111311_remove_obsolete_story_model/migration.sql
+----------------------------------------------------------------------------------------
+/*
+  Warnings:
+
+  - You are about to drop the `stories` table. If the table is not empty, all the data it contains will be lost.
+
+*/
+-- DropForeignKey
+ALTER TABLE "stories" DROP CONSTRAINT "stories_learningGoalId_fkey";
+
+-- DropForeignKey
+ALTER TABLE "stories" DROP CONSTRAINT "stories_studentId_fkey";
+
+-- DropTable
+DROP TABLE "stories";
+
+
+Файл: backend/prisma/migrations/20250707120000_remove_badges/migration.sql
+--------------------------------------------------------------------------
+-- DropForeignKey
+ALTER TABLE "badges" DROP CONSTRAINT "badges_studentId_fkey";
+
+-- DropTable
+DROP TABLE "badges";
+
+-- DropEnum
+DROP TYPE "BadgeStatus";
+
+
+Файл: backend/prisma/migrations/20250708100000_add_illustration_style/migration.sql
+-----------------------------------------------------------------------------------
+-- AlterTable
+ALTER TABLE "learning_goals" ADD COLUMN "illustrationStyle" TEXT NOT NULL DEFAULT 'ILLUSTRATION';
+
+
+Файл: backend/prisma/migrations/20250719195723_add_control_work_lesson_type/migration.sql
+-----------------------------------------------------------------------------------------
+-- AlterEnum
+ALTER TYPE "LessonType" ADD VALUE 'CONTROL_WORK';
+
+
+Файл: backend/prisma/migrations/migration_lock.toml
+---------------------------------------------------
+# Please do not edit this file manually
+# It should be added in your version-control system (e.g., Git)
+provider = "postgresql"
+
+
+Файл: backend/prisma/schema.prisma
+----------------------------------
+[Content of file schema.prisma truncated. First 10 lines:]
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+
+Файл: backend/scripts/check-db.ts
+---------------------------------
+// File: check-db.ts
+// Summary of declarations:
+
+async function checkDatabase() {
+  // ... implementation
+}
+
+Файл: backend/scripts/createTestUsers.ts
+----------------------------------------
+// File: createTestUsers.ts
+// Summary of declarations:
+
+const prisma = new PrismaClient();
+
+async function main() {
+  // ... implementation
+}
+
+Файл: backend/scripts/lowercase-emails.ts
+-----------------------------------------
+// File: lowercase-emails.ts
+// Summary of declarations:
+
+const prisma = new PrismaClient();
+
+async function lowercaseEmails() {
+  // ... implementation
+}
+
+Файл: backend/src/app.ts
+------------------------
+// File: app.ts
+// Summary of declarations:
+
+interface ServerWithWebSocket extends http.Server {
+  // ... implementation
+}
+
+Файл: backend/src/config/env.ts
+-------------------------------
+// File: env.ts
+// Summary of declarations:
+
+const envVars = envSchema.safeParse(process.env);
+
+export type Config = typeof config;
+
+Файл: backend/src/controllers/auth.controller.ts
+------------------------------------------------
+// File: auth.controller.ts
+// No top-level declarations found.
+
+Файл: backend/src/controllers/character.controller.ts
+-----------------------------------------------------
+// File: character.controller.ts
+// No top-level declarations found.
+
+Файл: backend/src/controllers/chat.controller.ts
+------------------------------------------------
+// File: chat.controller.ts
+// No top-level declarations found.
+
+Файл: backend/src/controllers/goal.controller.ts
+------------------------------------------------
+// File: goal.controller.ts
+// Summary of declarations:
+
+interface CreateGoalBody {
+  // ... implementation
+}
+
+Файл: backend/src/controllers/lesson.controller.ts
+--------------------------------------------------
+// File: lesson.controller.ts
+// No top-level declarations found.
+
+Файл: backend/src/controllers/performanceLogs.controller.ts
+-----------------------------------------------------------
+// File: performanceLogs.controller.ts
+// No top-level declarations found.
+
+Файл: backend/src/controllers/roadmap.controller.ts
+---------------------------------------------------
+// File: roadmap.controller.ts
+// No top-level declarations found.
+
+Файл: backend/src/controllers/story.controller.ts
+-------------------------------------------------
+// File: story.controller.ts
+// Summary of declarations:
+
+interface Request extends ExpressRequest {
+  // ... implementation
+}
+
+Файл: backend/src/controllers/student.controller.ts
+---------------------------------------------------
+// File: student.controller.ts
+// Summary of declarations:
+
+interface Request extends ExpressRequest {
+  // ... implementation
+}
+
+Файл: backend/src/controllers/teacher.controller.ts
+---------------------------------------------------
+// File: teacher.controller.ts
+// No top-level declarations found.
+
+Файл: backend/src/db.ts
+-----------------------
+// File: db.ts
+// Summary of declarations:
+
+const prisma = global.prisma || new PrismaClient(prismaOptions);
+
+Файл: backend/src/index.ts
+--------------------------
+// File: index.ts
+// Summary of declarations:
+
+const PORT = process.env.PORT || '3002';
+
+const { server } = createServer();
+
+Файл: backend/src/middlewares/auth.middleware.ts
+------------------------------------------------
+// File: auth.middleware.ts
+// No top-level declarations found.
+
+Файл: backend/src/middlewares/teacher.middleware.ts
+---------------------------------------------------
+// File: teacher.middleware.ts
+// No top-level declarations found.
+
+Файл: backend/src/routes/auth.routes.ts
+---------------------------------------
+// File: auth.routes.ts
+// Summary of declarations:
+
+const router = Router();
+
+Файл: backend/src/routes/character.routes.ts
+--------------------------------------------
+// File: character.routes.ts
+// Summary of declarations:
+
+const router = Router();
+
+Файл: backend/src/routes/chat.routes.ts
+---------------------------------------
+// File: chat.routes.ts
+// Summary of declarations:
+
+const router = Router();
+
+Файл: backend/src/routes/goal.routes.ts
+---------------------------------------
+// File: goal.routes.ts
+// Summary of declarations:
+
+const router = Router();
+
+Файл: backend/src/routes/image.routes.ts
+----------------------------------------
+// File: image.routes.ts
+// Summary of declarations:
+
+const router = Router();
+
+Файл: backend/src/routes/lesson.routes.ts
+-----------------------------------------
+// File: lesson.routes.ts
+// Summary of declarations:
+
+const router = Router();
+
+Файл: backend/src/routes/roadmap.routes.ts
+------------------------------------------
+// File: roadmap.routes.ts
+// Summary of declarations:
+
+const router = Router();
+
+Файл: backend/src/routes/story.routes.ts
+----------------------------------------
+// File: story.routes.ts
+// Summary of declarations:
+
+const router = Router();
+
+Файл: backend/src/routes/student.routes.ts
+------------------------------------------
+// File: student.routes.ts
+// Summary of declarations:
+
+const router = Router();
+
+Файл: backend/src/routes/teacher.routes.ts
+------------------------------------------
+// File: teacher.routes.ts
+// Summary of declarations:
+
+const router = Router();
+
+Файл: backend/src/services/auth.service.ts
+------------------------------------------
+// File: auth.service.ts
+// Summary of declarations:
+
+interface SafeUser {
+  // ... implementation
+}
+
+type PrismaType = typeof Prisma;
+
+interface TokenPayload {
+  // ... implementation
+}
+
+interface AuthResponse {
+  // ... implementation
+}
+
+const loginAttempts = new Map<string, { count: number;
+
+export const login = async (email: string, password: string, ipAddress: string): Promise<{ user: SafeUser;
+
+Файл: backend/src/services/chat.service.ts
+------------------------------------------
+// File: chat.service.ts
+// No top-level declarations found.
+
+Файл: backend/src/services/gemini.service.ts
+--------------------------------------------
+// File: gemini.service.ts
+// Summary of declarations:
+
+const genAI = new GoogleGenerativeAI(config.geminiApiKey);
+
+const MODEL_NAME = "gemini-2.5-flash";
+
+const TEMP_LOW = 0.2;
+
+const TEMP_MID = 0.45;
+
+const TEMP_HIGH = 0.85;
+
+function createGeminiHistory(systemPrompt: string, chatHistory: {
+  // ... implementation
+}
+
+async function callGemini(prompt: string, temperature: number, isJson: boolean) {
+  // ... implementation
+}
+
+async function callGeminiWithChat(history: Content[], temperature: number, isJson: boolean) {
+  // ... implementation
+}
+
+Файл: backend/src/services/leonardo.service.ts
+----------------------------------------------
+// File: leonardo.service.ts
+// Summary of declarations:
+
+const LEONARDO_API_URL = 'https://cloud.leonardo.ai/api/rest/v1';
+
+export interface GenerateImageParams {
+  // ... implementation
+}
+
+export interface GenerationResult {
+  // ... implementation
+}
+
+export async function startImageGeneration(params: GenerateImageParams): Promise<{
+  // ... implementation
+}
+
+export async function uploadImageToLeonardo(filePath: string): Promise<{
+  // ... implementation
+}
+
+export async function getGenerationResult(generationId: string): Promise<GenerationResult> {
+  // ... implementation
+}
+
+export async function generateImage(params: GenerateImageParams): Promise<GenerationResult> {
+  // ... implementation
+}
+
+Файл: backend/src/services/websocket.service.ts
+-----------------------------------------------
+// File: websocket.service.ts
+// Summary of declarations:
+
+interface AuthenticatedSocket extends Socket {
+  // ... implementation
+}
+
+export class WebSocketService {
+  // ... implementation
+}
+
+Файл: backend/src/utils/errors.ts
+---------------------------------
+// File: errors.ts
+// Summary of declarations:
+
+export class AppError extends Error {
+  // ... implementation
+}
+
+Файл: backend/src/utils/fileUpload.ts
+-------------------------------------
+// File: fileUpload.ts
+// No top-level declarations found.
+
+Файл: backend/src/utils/logger.ts
+---------------------------------
+// File: logger.ts
+// Summary of declarations:
+
+const { combine, timestamp, printf, colorize, errors } = format;
+
+Файл: backend/start.sh
+----------------------
+#!/bin/sh
+# This script ensures the server restarts automatically after a crash.
+
+while true; do
+  echo "[Auto-Restart] Starting Node.js server..."
+  # We run the command that directly starts the node process
+  node dist/index.js
+  echo "[Auto-Restart] Server process exited with code $?. Restarting in 3 seconds..."
+  sleep 3
+done
+
+
+Файл: backend/tsconfig.json
+---------------------------
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "commonjs",
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "moduleResolution": "node",
+    "resolveJsonModule": true
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "**/*.test.ts"]
+}
+
+
+Файл: frontend/index.html
+-------------------------
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#4f46e5" />
+    <title>Math Quest</title>
+    <base href="/" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+
+[... content truncated ...]
+
+        }
+      });
+    </script>
+  </body>
+</html>
+
+Файл: frontend/package.json
+---------------------------
+{
+  "name": "frontend",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
+    "preview": "vite preview"
+
+[... content truncated ...]
+
+    "tailwindcss": "^3.4.1",
+    "typescript": "^5.4.2",
+    "vite": "^5.1.6"
+  }
+}
+
+Файл: frontend/postcss.config.js
+--------------------------------
+// File: postcss.config.js
+// No top-level declarations found.
+
+Файл: frontend/src/App.tsx
+--------------------------
+// File: App.tsx
+// Summary of declarations:
+
+function App() {
+  // ... implementation
+}
+
+Файл: frontend/src/AuthInitializer.tsx
+--------------------------------------
+// File: AuthInitializer.tsx
+// No top-level declarations found.
+
+Файл: frontend/src/app/api/apiSlice.ts
+--------------------------------------
+// File: apiSlice.ts
+// No top-level declarations found.
+
+Файл: frontend/src/app/api/axiosBaseQuery.ts
+--------------------------------------------
+// File: axiosBaseQuery.ts
+// No top-level declarations found.
+
+Файл: frontend/src/app/hooks/index.ts
+-------------------------------------
+// File: index.ts
+// No top-level declarations found.
+
+Файл: frontend/src/app/hooks/useAppDispatch.ts
+----------------------------------------------
+// File: useAppDispatch.ts
+// Summary of declarations:
+
+type TypedDispatch = ThunkDispatch<RootState, unknown, UnknownAction>;
+
+export const useAppDispatch = (): TypedDispatch => useDispatch<TypedDispatch>();
+
+Файл: frontend/src/app/hooks/useAppSelector.ts
+----------------------------------------------
+// File: useAppSelector.ts
+// Summary of declarations:
+
+export const useAppSelector: TypedUseSelectorHook<RootState> = useSelector;
+
+Файл: frontend/src/app/store.ts
+-------------------------------
+// File: store.ts
+// Summary of declarations:
+
+export type RootState = ReturnType<typeof store.getState>;
+
+export type AppDispatch = typeof store.dispatch;
+
+Файл: frontend/src/components/common/Layout.tsx
+-----------------------------------------------
+// File: Layout.tsx
+// Summary of declarations:
+
+interface NavigationItem {
+  // ... implementation
+}
+
+function getStudentNavigation(t: (key: string) => string): NavigationItem[] {
+  // ... implementation
+}
+
+function getTeacherNavigation(t: (key: string) => string): NavigationItem[] {
+  // ... implementation
+}
+
+function classNames(...classes: (string | boolean | undefined)[]): string {
+  // ... implementation
+}
+
+Файл: frontend/src/components/common/Spinner.tsx
+------------------------------------------------
+// File: Spinner.tsx
+// Summary of declarations:
+
+type SpinnerSize = 'sm' | 'md' | 'lg';
+
+interface SpinnerProps {
+  // ... implementation
+}
+
+Файл: frontend/src/components/common/WebSocketManager.tsx
+---------------------------------------------------------
+// File: WebSocketManager.tsx
+// No top-level declarations found.
+
+Файл: frontend/src/components/icons/index.ts
+--------------------------------------------
+// File: index.ts
+// No top-level declarations found.
+
+Файл: frontend/src/context/SocketContext.tsx
+--------------------------------------------
+// File: SocketContext.tsx
+// Summary of declarations:
+
+export const SocketContext = createContext<Socket | null>(null);
+
+Файл: frontend/src/features/auth/authApi.ts
+-------------------------------------------
+// File: authApi.ts
+// No top-level declarations found.
+
+Файл: frontend/src/features/auth/authSlice.ts
+---------------------------------------------
+// File: authSlice.ts
+// Summary of declarations:
+
+export interface AuthState {
+  // ... implementation
+}
+
+const storedUserItem = localStorage.getItem('user');
+
+const initialUser: User | null = storedUserItem ? JSON.parse(storedUserItem) : null;
+
+const storedToken = localStorage.getItem('token');
+
+export const { logout, setUser } = authSlice.actions;
+
+export const selectCurrentUser = (state: RootState) => state.auth.user;
+
+export const selectCurrentToken = (state: RootState) => state.auth.token;
+
+export const selectIsAuthenticated = (state: RootState) => state.auth.isAuthenticated;
+
+Файл: frontend/src/features/chat/Chat.tsx
+-----------------------------------------
+// File: Chat.tsx
+// Summary of declarations:
+
+interface ChatUser {
+  // ... implementation
+}
+
+Файл: frontend/src/features/chat/chatApi.ts
+-------------------------------------------
+// File: chatApi.ts
+// Summary of declarations:
+
+type UnreadSummaryResponse = Record<string, number>;
+
+export const { useGetUnreadSummaryQuery, useLazyGetUnreadSummaryQuery } = chatApi;
+
+Файл: frontend/src/features/chat/chatSlice.ts
+---------------------------------------------
+// File: chatSlice.ts
+// Summary of declarations:
+
+export interface ChatState {
+  // ... implementation
+}
+
+const selectMessages = (state: RootState) => state.chat.messagesByPartnerId;
+
+const selectActivePartnerId = (state: RootState) => state.chat.activeChatPartnerId;
+
+Файл: frontend/src/features/goal/goalApi.ts
+-------------------------------------------
+// File: goalApi.ts
+// No top-level declarations found.
+
+Файл: frontend/src/features/lesson/lessonApi.ts
+-----------------------------------------------
+// File: lessonApi.ts
+// Summary of declarations:
+
+export interface GenerationResult {
+  // ... implementation
+}
+
+Файл: frontend/src/features/student/adventureSlice.ts
+-----------------------------------------------------
+// File: adventureSlice.ts
+// Summary of declarations:
+
+export interface AdventureState {
+  // ... implementation
+}
+
+export const selectAdventure = (state: RootState) => state.adventure;
+
+export const selectPracticeAnswers = (state: RootState) => state.adventure.practiceAnswers;
+
+export const selectStoryResponse = (state: RootState) => state.adventure.storyResponse;
+
+Файл: frontend/src/features/student/studentApi.ts
+-------------------------------------------------
+// File: studentApi.ts
+// Summary of declarations:
+
+interface SubmitLessonApiPayload {
+  // ... implementation
+}
+
+Файл: frontend/src/features/teacher/StudentsPage.tsx
+----------------------------------------------------
+// File: StudentsPage.tsx
+// Summary of declarations:
+
+interface ConnectStudentForm {
+  // ... implementation
+}
+
+Файл: frontend/src/features/teacher/teacherApi.ts
+-------------------------------------------------
+// File: teacherApi.ts
+// No top-level declarations found.
+
+Файл: frontend/src/i18n.ts
+--------------------------
+// File: i18n.ts
+// Summary of declarations:
+
+const savedLanguage = localStorage.getItem('i18nextLng') || 'ru';
+
+Файл: frontend/src/index.css
+----------------------------
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --brand-600: #4f46e5; /* indigo-600 */
+    --brand-500: #6366f1; /* indigo-500 */
+    --brand-400: #818cf8; /* indigo-400 */
+
+
+[... content truncated ...]
+
+}
+
+.animate-float {
+  animation: float 6s ease-in-out infinite;
+}
+
+Файл: frontend/src/locales/en/translation.json
+----------------------------------------------
+{
+  "studentDashboard": {
+    "loadingError": "Error loading data. Please try again later.",
+    "welcome": "Welcome, {{name}}!",
+    "student": "Student",
+    "quickAccess": "Quick Access",
+    "continueAdventure": "Continue Adventure",
+    "returnToLastLesson": "Return to the last lesson",
+    "chatWithTeacher": "Chat with Teacher",
+    "askQuestion": "Ask a question or get help",
+
+[... content truncated ...]
+
+  },
+  "common": {
+    "notImplemented": "This feature is not implemented yet."
+  }
+}
+
+Файл: frontend/src/locales/ru/translation.json
+----------------------------------------------
+{
+  "studentDashboard": {
+    "loadingError": "Ошибка загрузки данных. Пожалуйста, попробуйте позже.",
+    "welcome": "Добро пожаловать, {{name}}!",
+    "student": "Студент",
+    "quickAccess": "Быстрый доступ",
+    "continueAdventure": "Продолжить приключение",
+    "returnToLastLesson": "Вернуться к последнему уроку",
+    "chatWithTeacher": "Чат с учителем",
+    "askQuestion": "Задать вопрос или получить помощь",
+
+[... content truncated ...]
+
+    "registerSuccess": "Регистрация успешна! Перенаправляем...",
+    "registerFailedDefault": "Не удалось зарегистрироваться. Попробуйте ещё раз."
+  }
+  
+}
+
+Файл: frontend/src/main.tsx
+---------------------------
+// File: main.tsx
+// No top-level declarations found.
+
+Файл: frontend/src/pages/HomePage.tsx
+-------------------------------------
+// File: HomePage.tsx
+// No top-level declarations found.
+
+Файл: frontend/src/pages/LoginPage.tsx
+--------------------------------------
+// File: LoginPage.tsx
+// Summary of declarations:
+
+type LoginFormData = z.infer<typeof loginSchema>;
+
+Файл: frontend/src/pages/NotFoundPage.tsx
+-----------------------------------------
+// File: NotFoundPage.tsx
+// No top-level declarations found.
+
+Файл: frontend/src/pages/RegisterPage.tsx
+-----------------------------------------
+// File: RegisterPage.tsx
+// Summary of declarations:
+
+type RegisterFormData = z.infer<typeof registerSchema>;
+
+Файл: frontend/src/pages/chat/ChatPage.tsx
+------------------------------------------
+// File: ChatPage.tsx
+// No top-level declarations found.
+
+Файл: frontend/src/pages/student/CompletedLessonsPage.tsx
+---------------------------------------------------------
+// File: CompletedLessonsPage.tsx
+// No top-level declarations found.
+
+Файл: frontend/src/pages/student/StoryHistoryPage.tsx
+-----------------------------------------------------
+// File: StoryHistoryPage.tsx
+// No top-level declarations found.
+
+Файл: frontend/src/pages/student/StudentAdventurePage.tsx
+---------------------------------------------------------
+// File: StudentAdventurePage.tsx
+// Summary of declarations:
+
+const SummaryModal = ({ isOpen, onClose, summary, isLoading }: { isOpen: boolean;
+
+type LessonPhase = 'content' | 'assessment' | 'story' | 'control_work';
+
+type ChatMessage = { role: 'user' | 'assistant', content: string };
+
+Файл: frontend/src/pages/student/StudentDashboard.tsx
+-----------------------------------------------------
+// File: StudentDashboard.tsx
+// No top-level declarations found.
+
+Файл: frontend/src/pages/student/StudentStoriesListPage.tsx
+-----------------------------------------------------------
+// File: StudentStoriesListPage.tsx
+// No top-level declarations found.
+
+Файл: frontend/src/pages/teacher/CreateGoalPage.tsx
+---------------------------------------------------
+// File: CreateGoalPage.tsx
+// Summary of declarations:
+
+interface CreateGoalFormData {
+  // ... implementation
+}
+
+Файл: frontend/src/pages/teacher/LearningGoalsListPage.tsx
+----------------------------------------------------------
+// File: LearningGoalsListPage.tsx
+// No top-level declarations found.
+
+Файл: frontend/src/pages/teacher/LessonEditorModal.tsx
+------------------------------------------------------
+// File: LessonEditorModal.tsx
+// Summary of declarations:
+
+const Lightbox = ({ src, onClose }: { src: string;
+
+function classNames(...classes: (string | boolean)[]) {
+  // ... implementation
+}
+
+Файл: frontend/src/pages/teacher/RoadmapEditorPage.tsx
+------------------------------------------------------
+// File: RoadmapEditorPage.tsx
+// Summary of declarations:
+
+interface PerformanceLog {
+  // ... implementation
+}
+
+interface ChatMessage {
+  // ... implementation
+}
+
+interface RoadmapEditorContext {
+  // ... implementation
+}
+
+Файл: frontend/src/pages/teacher/TeacherDashboard.tsx
+-----------------------------------------------------
+// File: TeacherDashboard.tsx
+// No top-level declarations found.
+
+Файл: frontend/src/pages/teacher/components/CharacterEditor.tsx
+---------------------------------------------------------------
+// File: CharacterEditor.tsx
+// Summary of declarations:
+
+interface CharacterEditorProps {
+  // ... implementation
+}
+
+const Lightbox = ({ src, onClose }: { src: string;
+
+Файл: frontend/src/pages/teacher/components/ControlWorkContentEditor.tsx
+------------------------------------------------------------------------
+// File: ControlWorkContentEditor.tsx
+// Summary of declarations:
+
+interface LessonContentBlock {
+  // ... implementation
+}
+
+interface ChatMessage {
+  // ... implementation
+}
+
+interface ControlWorkContentEditorProps {
+  // ... implementation
+}
+
+Файл: frontend/src/pages/teacher/components/LessonContentEditor.tsx
+-------------------------------------------------------------------
+// File: LessonContentEditor.tsx
+// Summary of declarations:
+
+interface LessonContentBlock {
+  // ... implementation
+}
+
+interface ChatMessage {
+  // ... implementation
+}
+
+interface LessonContentEditorProps {
+  // ... implementation
+}
+
+Файл: frontend/src/pages/teacher/components/LessonStatusIndicator.tsx
+---------------------------------------------------------------------
+// File: LessonStatusIndicator.tsx
+// No top-level declarations found.
+
+Файл: frontend/src/pages/teacher/components/LessonStoryEditor.tsx
+-----------------------------------------------------------------
+// File: LessonStoryEditor.tsx
+// Summary of declarations:
+
+interface LessonStoryEditorProps {
+  // ... implementation
+}
+
+Файл: frontend/src/pages/teacher/components/RoadmapSection.tsx
+--------------------------------------------------------------
+// File: RoadmapSection.tsx
+// Summary of declarations:
+
+interface RoadmapSectionProps {
+  // ... implementation
+}
+
+function classNames(...classes: (string | boolean | undefined)[]) {
+  // ... implementation
+}
+
+Файл: frontend/src/types/models.ts
+----------------------------------
+// File: models.ts
+// Summary of declarations:
+
+export type UserRole = 'student' | 'teacher';
+
+export interface User {
+  // ... implementation
+}
+
+export interface StudentInfo {
+  // ... implementation
+}
+
+export interface StudentProfile extends User {
+  // ... implementation
+}
+
+export interface LearningGoal {
+  // ... implementation
+}
+
+export interface ContentSection {
+  // ... implementation
+}
+
+export type LessonType = 'THEORY' | 'PRACTICE' | 'WITH_TEACHER' | 'CONTROL_WORK';
+
+export interface Lesson {
+  // ... implementation
+}
+
+export interface StoryChapter {
+  // ... implementation
+}
+
+export interface StoryChapterHistory extends StoryChapter {
+  // ... implementation
+}
+
+export interface PerformanceLog {
+  // ... implementation
+}
+
+export interface RoadmapProposal {
+  // ... implementation
+}
+
+export interface OldRoadmapProposal {
+  // ... implementation
+}
+
+export interface SubmitLessonPayload {
+  // ... implementation
+}
+
+export interface AIAssessmentResponse {
+  // ... implementation
+}
+
+Файл: frontend/src/types/websocket.ts
+-------------------------------------
+// File: websocket.ts
+// Summary of declarations:
+
+export interface StudentSubmittedLessonEvent {
+  // ... implementation
+}
+
+export interface TeacherReviewedLessonEvent {
+  // ... implementation
+}
+
+export interface StudentRequestedReviewEvent {
+  // ... implementation
+}
+
+Файл: frontend/src/vite-env.d.ts
+--------------------------------
+// File: vite-env.d.ts
+// Summary of declarations:
+
+interface ImportMetaEnv {
+  // ... implementation
+}
+
+interface ImportMeta {
+  // ... implementation
+}
+
+Файл: frontend/tailwind.config.js
+---------------------------------
+// File: tailwind.config.js
+// No top-level declarations found.
+
+Файл: frontend/tsconfig.json
+----------------------------
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "useDefineForClassFields": true,
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+    "noEmit": true,
+    "moduleResolution": "node",
+    "resolveJsonModule": true,
+
+[... content truncated ...]
+
+  },
+  "include": ["src"],
+  "exclude": ["node_modules", "dist"],
+  "references": [{ "path": "./tsconfig.node.json" }]
+}
+
+Файл: frontend/tsconfig.node.json
+---------------------------------
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "composite": true,
+    "module": "esnext",
+    "moduleResolution": "node",
+    "target": "ESNext",
+    "types": ["node"],
+    "allowSyntheticDefaultImports": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "strict": true,
+    "noEmit": false
+  },
+  "include": ["vite.config.ts", "plugins/spa-fallback.ts", "vite-spa-fallback.ts"],
+  "exclude": ["node_modules", "dist", "**/*.test.ts"]
+}
+
+
+Файл: frontend/vite.config.ts
+-----------------------------
+// File: vite.config.ts
+// Summary of declarations:
+
+const __filename = fileURLToPath(import.meta.url);
+
+const __dirname = resolve(__filename, '..');
+
+Файл: package.json
+------------------
+{
+  "name": "math-quest",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently \"npm run backend:dev\" \"npm run frontend:dev\"",
+    "backend:dev": "cd backend && npm run dev",
+    "frontend:dev": "cd frontend && npm run dev",
+    "install:all": "npm install && cd backend && npm install && cd ../frontend && npm install",
+    "build": "cd backend && npm run build && cd ../frontend && npm run build",
+
+[... content truncated ...]
+
+  },
+  "prisma": {
+    "schema": "backend/prisma/schema.prisma"
+  }
+}
+
+Файл: sloth_plan.txt
+--------------------
+Задача понятна. Пользователь хочет узнать, как запустить проект. Самый простой и правильный способ — создать файл `README.md` с инструкциями по установке и запуску. Это будет постоянным руководством для пользователя и других разработчиков.
+
+**План:**
+
+1.  Создать файл `README.md` в корне проекта.
+2.  Добавить в `README.md` исчерпывающие инструкции, которые включают:
+    *   Необходимые условия для запуска (Node.js, npm, PostgreSQL).
+    *   Порядок установки зависимостей с помощью команды `npm run install:all` из корневой директории.
+    *   Инструкцию по настройке файла окружения `.env` для бэкенда.
+    *   Команду для применения миграций базы данных: `npm run prisma:migrate`.
+    *   Основную команду для запуска проекта в режиме разработки: `npm run dev`.
+
+Цель — предоставить пользователю единый документ, к которому он сможет обращаться для запуска проекта.
+--- КОНЕЦ КОНТЕКСТА ---
+Задача: Научи меня пожалуйста как запускать этот проект, кажется там был специальный файл для запуска, как запустить чтобы все работало, желательно самый быстрый и простой способ
+Проанализируй задачу и предоставь ответ, строго следуя правилам исполнения.
+
+
+================================================================================
+ОТВЕТ (Состояние: EXECUTION, Итерация: 1)
+--------------------------------------------------------------------------------
+Я проанализировал структуру вашего проекта и подготовил инструкцию по его запуску. Самый простой способ — это использовать команду `npm run dev` из корневой папки, но перед этим нужно выполнить несколько шагов по настройке.
+
+Я создал файл `README.md` в корне проекта, в котором подробно описан весь процесс — от установки зависимостей до запуска. Вы можете следовать этой инструкции, чтобы запустить проект.
+
+```write_file path="README.md" boundary="SLOTH_BOUNDARY_070162a1463b4766a0640e529949ed46"
+# Tutor Game Project
+
+Этот документ содержит инструкции по настройке и запуску проекта Tutor Game локально для разработки.
+
+## Предварительные требования
+
+Перед началом убедитесь, что на вашей системе установлено следующее:
+*   [Node.js](https://nodejs.org/) (рекомендуется v18 или новее)
+*   [npm](https://www.npmjs.com/) (обычно поставляется с Node.js)
+*   [PostgreSQL](https://www.postgresql.org/)
+
+Вам потребуется запущенный сервер PostgreSQL и созданная для этого проекта база данных.
+
+## Инструкции по установке
+
+Выполните следующие шаги, чтобы настроить свою среду разработки:
+
+### 1. Клонирование репозитория (если вы еще этого не сделали)
+
+```bash
+git clone <URL_репозитория>
+cd tutor-game-new
+```
+
+### 2. Установка зависимостей
+
+Этот проект представляет собой монорепозиторий с отдельными пакетами `frontend` и `backend`. Чтобы установить все зависимости для обоих пакетов одновременно, выполните следующую команду из корневого каталога проекта:
+
+```bash
+npm run install:all
+```
+Эта команда установит `node_modules` как для бэкенда, так и для фронтенда.
+
+### 3. Настройка окружения для бэкенда
+
+Серверу бэкенда требуются переменные окружения для конфигурации, такие как данные для подключения к базе данных.
+
+1.  Перейдите в каталог `backend`:
+    ```bash
+    cd backend
+    ```
+
+2.  Скопируйте файл с примером переменных окружения:
+    ```bash
+    cp .env.example .env
+    ```
+
+3.  Откройте только что созданный файл `.env` в текстовом редакторе и обновите переменные, особенно `DATABASE_URL`, чтобы они соответствовали вашей локальной настройке PostgreSQL.
+
+    **Пример:**
+    ```
+    DATABASE_URL="postgresql://YOUR_USERNAME:YOUR_PASSWORD@localhost:5432/YOUR_DATABASE_NAME?schema=public"
+    ```
+    Замените `YOUR_USERNAME`, `YOUR_PASSWORD` и `YOUR_DATABASE_NAME` на ваши реальные данные.
+
+### 4. Применение миграций базы данных
+
+После настройки базы данных в `.env`, вам необходимо применить схему данных. Находясь в каталоге `backend`, выполните следующую команду:
+
+```bash
+npm run prisma:migrate
+```
+Эта команда создаст все необходимые таблицы в вашей базе данных на основе схемы, определенной в `prisma/schema.prisma`.
+
+### 5. Запуск проекта
+
+Теперь вы готовы к запуску приложения.
+
+1.  Вернитесь в корневой каталог проекта:
+    ```bash
+    cd ..
+    ```
+
+2.  Запустите серверы бэкенда и фронтенда в режиме разработки с помощью одной команды:
+    ```bash
+    npm run dev
+    ```
+
+Эта команда сделает следующее:
+-   Запустит сервер бэкенда (по умолчанию на `http://localhost:3002`).
+-   Запустит сервер для разработки фронтенда (по умолчанию на `http://localhost:5173`).
+
+Теперь вы можете получить доступ к приложению, открыв `http://localhost:5173` в вашем веб-браузере.
+
+## Основные скрипты
+
+Краткий список наиболее важных скриптов, доступных в корневом `package.json`:
+
+-   `npm run dev`: **(Основная команда)** Запускает одновременно бэкенд и фронтенд для разработки.
+-   `npm run install:all`: Устанавливает зависимости для `frontend` и `backend`.
+-   `npm run build`: Собирает фронтенд и бэкенд для продакшена.
+-   `npm run backend:dev`: Запускает только сервер бэкенда.
+-   `npm run frontend:dev`: Запускает только сервер фронтенда.
+SLOTH_BOUNDARY_070162a1463b4766a0640e529949ed46
+```
+```summary
+Я создал файл `README.md` в корневой директории проекта. В этом файле содержатся пошаговые инструкции по установке, настройке и запуску проекта. Основная команда для запуска — `npm run dev`. Теперь у вас есть вся необходимая информация для старта.
+```
+ГОТОВО
+```done_summary
+Я создал файл README.md с подробными инструкциями по запуску, как и просил пользователь. Этот файл теперь находится в корне проекта и служит единым источником информации для настройки и старта приложения. Задача решена полностью.
+```
+
+
+Файл: sloth_runner.py
+---------------------
+# Файл: sloth_runner.py
+import subprocess
+import platform
+import re
+import hashlib
+import os
+from colors import Colors
+
+def get_file_hash(filepath):
+    """Вычисляет SHA256 хэш файла."""
+    if not os.path.exists(filepath) or os.path.isdir(filepath): return None
+    h = hashlib.sha256()
+    with open(filepath, 'rb') as f:
+        while True:
+            chunk = f.read(8192)
+            if not chunk: break
+            h.update(chunk)
+    return h.hexdigest()
+
+def _adapt_commands_for_project_root(s: str) -> str:
+    cwd = os.getcwd(); root = os.path.basename(cwd.rstrip(os.sep))
+    root_posix = cwd.replace("\\","/").rstrip("/")
+    s = re.sub(r'^' + re.escape(root + "/"), '', s, flags=re.MULTILINE)
+    s = re.sub(r'([ \t\'"])' + re.escape(root + "/"), r'\1', s)
+    s = re.sub(r'^' + re.escape(root_posix + "/"), '', s, flags=re.MULTILINE)
+    s = re.sub(r'([ \t\'"])' + re.escape(root_posix + "/"), r'\1', s)
+    return s
+
+def execute_commands(commands_str):
+    """
+    Выполняет блок shell-команд.
+    Возвращает кортеж: (success, failed_command, error_message)
+    """
+    print(f"{Colors.OKBLUE}  [Детали] Запуск выполнения блока команд...{Colors.ENDC}")
+
+    # ИЗМЕНЕНО: Более надежный способ поиска путей, включая те, что в кавычках
+    filepaths = re.findall(r'[\'"]?([a-zA-Z0-9_\-\.\/]+)[\'"]?', commands_str)
+    
+    # Собираем информацию о состоянии ДО выполнения команд
+    hashes_before = {fp: get_file_hash(fp) for fp in filepaths if os.path.isfile(fp)}
+    dirs_before = {fp for fp in filepaths if os.path.isdir(fp)}
+    files_before = {fp for fp in filepaths if os.path.exists(fp)} # Все пути, включая папки
+    
+    try:
+        is_macos = platform.system() == "Darwin"
+        # Чистим возможные префиксы корня проекта в путях
+        commands_str_fixed = _adapt_commands_for_project_root(commands_str)
+        # Для macOS добавляем флаг .bak для sed -i, чтобы он работал как в Linux
+        commands_str_adapted = re.sub(r"sed -i ", "sed -i '.bak' ", commands_str_fixed) if is_macos else commands_str_fixed
+        full_command = f"set -e\n{commands_str_adapted}"
+
+        print(f"{Colors.WARNING}⚡️ ЛОГ: Выполняю блок команд (bash, set -e)...{Colors.ENDC}")
+        result = subprocess.run(['bash', '-c', full_command], capture_output=True, text=True, encoding='utf-8')
+
+        if result.returncode != 0:
+            error_msg = f"Команда завершилась с ненулевым кодом выхода ({result.returncode}).\nОшибка (STDERR): {result.stderr.strip()}"
+            print(f"{Colors.FAIL}❌ ЛОГ: КРИТИЧЕСКАЯ ОШИБКА при выполнении блока команд.\n{error_msg}{Colors.ENDC}")
+            return False, commands_str, result.stderr.strip() or "Команда провалилась без вывода в stderr."
+
+        if result.stderr:
+            print(f"{Colors.WARNING}⚠️  ПРЕДУПРЕЖДЕНИЕ (STDERR от успешной команды):\n{result.stderr.strip()}{Colors.ENDC}")
+
+        # Удаляем временные файлы .bak, созданные sed на macOS
+        if is_macos:
+            subprocess.run("find . -name '*.bak' -delete", shell=True, check=True, capture_output=True)
+
+        # --- НОВАЯ, БОЛЕЕ НАДЕЖНАЯ ПРОВЕРКА ИЗМЕНЕНИЙ ---
+        hashes_after = {fp: get_file_hash(fp) for fp in hashes_before.keys()}
+        files_after = {fp for fp in filepaths if os.path.exists(fp)}
+
+        # Проверяем, изменился ли хэш у существующих файлов
+        modified_files = any(hashes_before.get(fp) != hashes_after.get(fp) for fp in hashes_before)
+        # Проверяем, появились ли новые файлы или папки
+        created_paths = files_after - files_before
+        
+        if not modified_files and not created_paths:
+            # Если ничего не изменилось и не создалось - это ошибка логики
+            error_msg = ("Команда выполнилась успешно, но не изменила и не создала ни одного файла или папки. "
+                         "Вероятно, шаблон (например, в sed) не был найден или путь к файлу неверен.")
+            final_error_message = result.stderr.strip() if result.stderr else error_msg
+            print(f"{Colors.FAIL}❌ ЛОГ: ОШИБКА ЛОГИКИ: {error_msg}{Colors.ENDC}")
+            if result.stderr:
+                print(f"Причина из STDERR: {final_error_message}")
+            return False, commands_str, final_error_message
+
+        # Если были изменения или создания, все хорошо
+        if modified_files:
+            print(f"{Colors.OKGREEN}✅ ЛОГ: Блок команд успешно выполнен. Файлы были изменены.{Colors.ENDC}")
+        if created_paths:
+            print(f"{Colors.OKGREEN}✅ ЛОГ: Блок команд успешно выполнен. Были созданы новые пути: {', '.join(created_paths)}{Colors.ENDC}")
+            
+        return True, None, None
+
+    except Exception as e:
+        print(f"{Colors.FAIL}❌ ЛОГ: Непредвиденная ОШИБКА в исполнителе: {e}{Colors.ENDC}")
+        return False, commands_str, str(e)

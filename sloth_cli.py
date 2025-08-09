@@ -8,6 +8,7 @@ import platform
 import subprocess
 import argparse
 from tkinter import Tk, filedialog
+import uuid
 
 from colors import Colors, Symbols
 import sloth_core
@@ -105,37 +106,66 @@ def extract_block(tag, text):
             return content.strip()
     return None
 
-def _iter_write_file_blocks(text):
-    """
-    НАДЁЖНЫЙ разбор всех блоков ```write_file path\n... \n```.
-    Важно: не обрезаем содержимое и поддерживаем несколько блоков подряд.
-    """
-    lines = text.splitlines()
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        stripped = line.strip()
-        if stripped.startswith("```write_file"):
-            # Форматы:
-            # ```write_file path/to/file.ext
-            # <контент>
-            # ```
-            parts = stripped.split(None, 1)
-            filepath = ""
-            if len(parts) > 1:
-                filepath = parts[1].strip()
+_ALLOWED_TAGS_AFTER_FENCE = {"summary","bash","manual","files","plan","clarification","done_summary","write_file"}
+
+def _parse_write_file_header(header_line: str):
+    header = header_line.strip()
+    if header.startswith("```write_file"):
+        header = header[len("```write_file"):].strip()
+    path, boundary = "", None
+    m = re.search(r'boundary\s*=\s*"([^"]+)"', header) or re.search(r'boundary\s*=\s*([^\s]+)', header)
+    if m: boundary = m.group(1).strip().strip('"').strip("'")
+    p = re.search(r'path\s*=\s*"([^"]+)"', header) or re.search(r'path\s*=\s*([^\s]+)', header)
+    if p: path = p.group(1).strip().strip('"').strip("'")
+    else:
+        for tok in header.split():
+            if "=" not in tok:
+                path = tok.strip().strip('"').strip("'"); break
+    return path, boundary
+
+def _iter_write_file_blocks(answer_text: str, boundary_token: str):
+    lines, i, n = answer_text.splitlines(), 0, len(answer_text.splitlines())
+    while i < n:
+        ln = lines[i].strip()
+        if ln.startswith("```write_file"):
+            filepath, boundary = _parse_write_file_header(ln)
             i += 1
-            start = i
-            content_lines = []
-            while i < len(lines) and lines[i].strip() != "```":
-                content_lines.append(lines[i])
-                i += 1
-            yield filepath, "\n".join(content_lines)
-            # пропускаем закрывающую ```
-            if i < len(lines) and lines[i].strip() == "```":
-                i += 1
-            continue
+            content = []
+            if boundary:  # главный путь: читаем до строки-границы
+                while i < n and lines[i].strip() != boundary:
+                    content.append(lines[i]); i += 1
+                if i < n and lines[i].strip() == boundary: i += 1
+                if i < n and lines[i].strip() == "```": i += 1
+                yield filepath, "\n".join(content); continue
+            # fallback: закрытие только если после ``` реально начинается новый блок
+            while i < n:
+                if lines[i].strip() == "```":
+                    j = i + 1
+                    while j < n and lines[j].strip() == "": j += 1
+                    if j >= n: break
+                    nxt = lines[j].strip()
+                    if nxt.startswith("```"): break
+                    if any(nxt.startswith(t) or nxt.startswith(f"```{t}") for t in _ALLOWED_TAGS_AFTER_FENCE):
+                        break
+                    content.append(lines[i]); i += 1; continue
+                content.append(lines[i]); i += 1
+            if i < n and lines[i].strip() == "```": i += 1
+            yield filepath, "\n".join(content); continue
         i += 1
+
+def _normalize_model_path(p: str) -> str:
+    p = (p or "").strip().strip('"').strip("'").replace("\\","/")
+    if p.startswith("./"): p = p[2:]
+    cwd = os.getcwd(); root = os.path.basename(cwd.rstrip(os.sep))
+    cwd_posix = cwd.replace("\\","/").rstrip("/")
+    if p.startswith("/"):
+        if p.startswith(cwd_posix + "/"): p = p[len(cwd_posix)+1:]
+        else: p = p.lstrip("/")
+    if p.startswith(root + "/"): p = p[len(root)+1:]
+    p = os.path.normpath(p).replace("\\","/")
+    if p.startswith("../"): p = p[3:]
+    if p == ".": p = ""
+    return p
 
 def update_history_with_attempt(history_file_path, goal, summary):
     try:
@@ -200,6 +230,9 @@ def main(is_fix_mode, is_fast_mode, history_file_path, run_log_file_path):
     state = "EXECUTION" if is_fast_mode else "PLANNING"
     iteration_count, files_to_include_fully, current_prompt = 1, None, None
 
+    # Генерируем уникальный токен-границу для write_file
+    BOUNDARY_TOKEN = f"SLOTH_BOUNDARY_{uuid.uuid4().hex}"
+
     while iteration_count <= MAX_ITERATIONS:
         model_instance, active_service = sloth_core.get_active_service_details()
 
@@ -208,7 +241,7 @@ def main(is_fix_mode, is_fast_mode, history_file_path, run_log_file_path):
             project_context = get_project_context(is_fast_mode=False, files_to_include_fully=None)
             if not project_context:
                 return f"{Colors.FAIL}КРИТИЧЕСКАЯ ОШИБКА: Не удалось получить контекст проекта.{Colors.ENDC}"
-            current_prompt = sloth_core.get_clarification_and_planning_prompt(project_context, initial_task)
+            current_prompt = sloth_core.get_clarification_and_planning_prompt(project_context, initial_task, boundary=BOUNDARY_TOKEN)
         
         elif state == "EXECUTION" and current_prompt is None:
             project_context = get_project_context(is_fast_mode, files_to_include_fully)
@@ -216,7 +249,8 @@ def main(is_fix_mode, is_fast_mode, history_file_path, run_log_file_path):
                 return f"{Colors.FAIL}КРИТИЧЕСКАЯ ОШИБКА: Не удалось обновить контекст.{Colors.ENDC}"
             current_prompt = sloth_core.get_initial_prompt(
                 project_context, initial_task,
-                sloth_core.get_active_service_details() and (load_fix_history(history_file_path) if is_fix_mode else None)
+                sloth_core.get_active_service_details() and (load_fix_history(history_file_path) if is_fix_mode else None),
+                boundary=BOUNDARY_TOKEN
             )
             
         log_iter = iteration_count if state == "EXECUTION" else 0
@@ -291,28 +325,34 @@ def main(is_fix_mode, is_fast_mode, history_file_path, run_log_file_path):
             
             # --- ОБРАБОТКА ДЕЙСТВИЙ: write_file (мульти-блоки) или bash ---
             commands_to_run = extract_block("bash", answer_text)
-            write_blocks = list(_iter_write_file_blocks(answer_text))
+            write_blocks = list(_iter_write_file_blocks(answer_text, boundary_token=BOUNDARY_TOKEN))
             strategy_description = extract_block("summary", answer_text) or "Стратегия не описана"
             
             action_taken, success, failed_command, error_message = False, False, "N/A", ""
 
             if write_blocks:
                 action_taken = True
-                for filepath, content in write_blocks:
+                for raw_filepath, content in write_blocks:
                     try:
+                        filepath = _normalize_model_path(raw_filepath)
                         print(f"\n{Colors.OKBLUE}📝 Найден блок write_file. Перезаписываю файл: {filepath}{Colors.ENDC}")
                         dir_name = os.path.dirname(filepath)
                         if dir_name:
                             os.makedirs(dir_name, exist_ok=True)
                         # Пишем БЕЗ strip(), С РОВНО ТЕМ СОДЕРЖИМЫМ, ЧТО ПРИШЛО
+                        # Жёсткий сэндбокс: запись только внутри корня проекта
+                        abs_path = os.path.realpath(filepath)
+                        root_abs = os.path.realpath(os.getcwd())
+                        if not abs_path.startswith(root_abs + os.sep):
+                            raise RuntimeError(f"Запрещён путь вне корня проекта: {filepath}")
                         with open(filepath, "w", encoding="utf-8", newline="") as f:
                             f.write(content)
                         print(f"{Colors.OKGREEN}✅ Файл успешно перезаписан: {filepath}{Colors.ENDC}")
                         success = True
                     except Exception as e:
-                        print(f"{Colors.FAIL}❌ ОШИБКА при записи файла '{filepath}': {e}{Colors.ENDC}")
+                        print(f"{Colors.FAIL}❌ ОШИБКА при записи файла '{raw_filepath}': {e}{Colors.ENDC}")
                         success = False
-                        failed_command = f"write_file {filepath}"
+                        failed_command = f"write_file {raw_filepath}"
                         error_message = str(e)
                         break  # прекращаем последовательность, чтобы вернуть ошибку корректно
 
@@ -324,7 +364,7 @@ def main(is_fix_mode, is_fast_mode, history_file_path, run_log_file_path):
             if not action_taken:
                 print(f"{Colors.FAIL}❌ ЛОГ: Модель не вернула команд. Пробую на следующей итерации.{Colors.ENDC}")
                 project_context = get_project_context(is_fast_mode, files_to_include_fully)
-                current_prompt = sloth_core.get_review_prompt(project_context, user_goal, iteration_count + 1, attempt_history)
+                current_prompt = sloth_core.get_review_prompt(project_context, user_goal, iteration_count + 1, attempt_history, boundary=BOUNDARY_TOKEN)
                 iteration_count += 1
                 continue
             
@@ -336,11 +376,11 @@ def main(is_fix_mode, is_fast_mode, history_file_path, run_log_file_path):
             history_entry = f"**Итерация {iteration_count}:**\n**Стратегия:** {strategy_description}\n"
             if success:
                 history_entry += "**Результат:** УСПЕХ"
-                current_prompt = sloth_core.get_review_prompt(project_context, user_goal, iteration_count + 1, attempt_history)
+                current_prompt = sloth_core.get_review_prompt(project_context, user_goal, iteration_count + 1, attempt_history, boundary=BOUNDARY_TOKEN)
             else:
                 history_entry += f"**Результат:** ПРОВАЛ\n**Ошибка:** {error_message}"
                 current_prompt = sloth_core.get_error_fixing_prompt(
-                    failed_command, error_message, user_goal, project_context, iteration_count + 1, attempt_history
+                    failed_command, error_message, user_goal, project_context, iteration_count + 1, attempt_history, boundary=BOUNDARY_TOKEN
                 )
             
             attempt_history.append(history_entry)

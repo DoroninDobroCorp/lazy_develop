@@ -326,10 +326,22 @@ def send_request_to_model(model_instance, active_service, prompt_text, iteration
             initialize_model()
         return None
 
-def get_command_rules(stage='execution'):
+def get_command_rules(stage='execution', boundary=None):
     """
     Возвращает правила в зависимости от этапа (планирование или исполнение).
     """
+    boundary_instr = ""
+    if boundary:
+        boundary_instr = f"""
+**Формат write_file с BOUNDARY (обязателен):**
+```write_file path="path/to/file" boundary="{boundary}"
+<любой контент файла, в т.ч. с внутренними ```
+ и ```bash блоками>
+{boundary}
+
+Последняя строка ПЕРЕД закрывающим ``` — ровно {boundary}.
+"""
+
     base_rules = f"""
 **ГЛОБАЛЬНЫЕ ПРАВИЛА (ОБЯЗАТЕЛЬНЫ К ИСПОЛНЕНИЮ):**
 
@@ -368,6 +380,7 @@ def get_command_rules(stage='execution'):
     *   **Завершение:** Если задача решена, напиши **только** `ГОТОВО`, затем блок ```done_summary ... ```. Для ручных шагов добавь блок ```manual```.
 
 {base_rules}
+{boundary_instr}
 """
 
     if stage == 'planning':
@@ -383,10 +396,11 @@ def get_command_rules(stage='execution'):
 3.  Запрещено генерировать ```bash``` или `write_file` на этапе планирования.
 
 {base_rules}
+{boundary_instr}
 """
 
-def get_clarification_and_planning_prompt(context, task):
-    rules = get_command_rules(stage='planning')
+def get_clarification_and_planning_prompt(context, task, boundary=None):
+    rules = get_command_rules(stage='planning', boundary=boundary)
     return f"""{rules}
 
 --- КОНТЕКСТ ПРОЕКТА (СОКРАЩЕННЫЙ) ---
@@ -400,7 +414,7 @@ def get_clarification_and_planning_prompt(context, task):
 Проанализируй задачу и контекст. Следуй правилам этапа планирования.
 """
 
-def get_initial_prompt(context, task, fix_history=None):
+def get_initial_prompt(context, task, fix_history=None, boundary=None):
     history_prompt_section = ""
     if fix_history:
         history_prompt_section = f"""
@@ -409,7 +423,7 @@ def get_initial_prompt(context, task, fix_history=None):
 --- КОНЕЦ ИСТОРИИ ---
 Проанализируй свою прошлую ошибку и начни заново.
 """
-    return f"""{get_command_rules(stage='execution')}
+    return f"""{get_command_rules(stage='execution', boundary=boundary)}
 {history_prompt_section}
 --- КОНТЕКСТ ПРОЕКТА (ПОЛНЫЙ ИЛИ ЧАСТИЧНЫЙ) ---
 {context}
@@ -418,7 +432,7 @@ def get_initial_prompt(context, task, fix_history=None):
 Проанализируй задачу и предоставь ответ, строго следуя правилам исполнения.
 """
 
-def get_review_prompt(context, goal, iteration_count, attempt_history):
+def get_review_prompt(context, goal, iteration_count, attempt_history, boundary=None):
     iteration_info = ""
     if iteration_count >= 4:
         iteration_info = f"\n**ОСОБОЕ ВНИМАНИЕ (Итерация {iteration_count}):** Сделано уже несколько шагов — проанализируй проблему глубже.\n"
@@ -429,7 +443,7 @@ def get_review_prompt(context, goal, iteration_count, attempt_history):
             "\n---\n".join(attempt_history) +
             "\n--- КОНЕЦ ИСТОРИИ ---\n"
         )
-    return f"""{get_command_rules(stage='execution')}
+    return f"""{get_command_rules(stage='execution', boundary=boundary)}
 {iteration_info}
 {history_info}
 **ВАЖНО:** Предыдущий шаг выполнен. Код ниже — это **обновлённое состояние** проекта.
@@ -446,7 +460,7 @@ def get_review_prompt(context, goal, iteration_count, attempt_history):
 Напоминаю ИСХОДНУЮ ЦЕЛЬ: {goal}
 """
 
-def get_error_fixing_prompt(failed_command, error_message, goal, context, iteration_count, attempt_history):
+def get_error_fixing_prompt(failed_command, error_message, goal, context, iteration_count, attempt_history, boundary=None):
     iteration_info = ""
     if iteration_count >= 4:
         iteration_info = f"\n**ОСОБОЕ ВНИМАНИЕ (Итерация {iteration_count}):** Произошла ошибка — подумай шире и исправь её надёжно.\n"
@@ -457,7 +471,7 @@ def get_error_fixing_prompt(failed_command, error_message, goal, context, iterat
             "\n---\n".join(attempt_history) +
             "\n--- КОНЕЦ ИСТОРИИ ---\n"
         )
-    return f"""{get_command_rules(stage='execution')}
+    return f"""{get_command_rules(stage='execution', boundary=boundary)}
 {iteration_info}
 {history_info}
 **ВАЖНО:** Исправь ошибку. Не пиши `ГОТОВО`.
