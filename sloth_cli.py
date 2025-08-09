@@ -16,6 +16,7 @@ MAX_ITERATIONS = 15
 CONTEXT_SCRIPT = 'AskGpt.py' # Оставим для обратной совместимости, если context_collector не сработает
 CONTEXT_FILE = 'message_1.txt'
 HISTORY_FILE = 'sloth_history.json'
+RUN_LOG_FILE = 'sloth_run.log'
 
 def calculate_cost(model_name, input_tokens, output_tokens):
     """
@@ -56,6 +57,20 @@ def get_project_context():
     except Exception as e:
         print(f"{Colors.FAIL}❌ ЛОГ: КРИТИЧЕСКАЯ ОШИБКА в get_project_context: {e}{Colors.ENDC}")
         return None
+
+def _log_run(title, content):
+    """Пишет запись в файл запуска. Один файл на весь запуск, перезаписывается при старте."""
+    try:
+        with open(RUN_LOG_FILE, 'a', encoding='utf-8') as f:
+            f.write("\n" + "="*80 + "\n")
+            f.write(f"{title}\n")
+            f.write("-"*80 + "\n")
+            if content is None:
+                content = "<empty>"
+            f.write(str(content) + "\n")
+            f.write("="*80 + "\n")
+    except Exception as e:
+        print(f"{Colors.WARNING}⚠️  ПРЕДУПРЕЖДЕНИЕ: Не удалось записать в {RUN_LOG_FILE}: {e}{Colors.ENDC}")
 
 def _read_multiline_input(prompt):
     """Читает многострочный ввод от пользователя."""
@@ -203,6 +218,8 @@ def main(is_fix_mode=False):
         model_instance, active_service = sloth_core.get_active_service_details()
         print(f"\n{Colors.BOLD}{Colors.HEADER}🚀 --- ЭТАП: {current_phase} | ИТЕРАЦИЯ {iteration_count}/{MAX_ITERATIONS} (API: {active_service}) ---{Colors.ENDC}")
 
+        # Логируем запрос перед отправкой
+        _log_run(f"ИТЕРАЦИЯ {iteration_count}: ЗАПРОС В МОДЕЛЬ", current_prompt)
         answer_data = sloth_core.send_request_to_model(model_instance, active_service, current_prompt, iteration_count)
         if not answer_data:
             if sloth_core.model:
@@ -226,6 +243,8 @@ def main(is_fix_mode=False):
         print(f"{Colors.GREY}📊 Статистика: Вход: {answer_data['input_tokens']} т., Выход: {answer_data['output_tokens']} т. Стоимость: ~${iteration_cost:.6f}{Colors.ENDC}")
         
         answer_text = answer_data["text"]
+        # Логируем сырой ответ модели
+        _log_run(f"ИТЕРАЦИЯ {iteration_count}: ОТВЕТ МОДЕЛИ (RAW)", answer_text)
 
         if answer_text.strip().upper().startswith("ГОТОВО"):
             done_summary = extract_done_summary_block(answer_text)
@@ -234,8 +253,10 @@ def main(is_fix_mode=False):
             if done_summary:
                 save_completion_history(user_goal, done_summary)
                 print(f"{Colors.OKGREEN}📄 ИТОГОВОЕ РЕЗЮМЕ:\n{Colors.CYAN}{done_summary}{Colors.ENDC}")
+                _log_run(f"ИТЕРАЦИЯ {iteration_count}: DONE SUMMARY", done_summary)
             if manual_steps:
                  final_message += f"\n\n{Colors.WARNING}✋ ТРЕБУЮТСЯ РУЧНЫЕ ДЕЙСТВИЯ:{Colors.ENDC}\n{manual_steps}"
+                 _log_run(f"ИТЕРАЦИЯ {iteration_count}: MANUAL STEPS", manual_steps)
             break
 
         commands_to_run = extract_todo_block(answer_text)
@@ -246,9 +267,18 @@ def main(is_fix_mode=False):
             continue
 
         strategy_description = extract_summary_block(answer_text) or "Стратегия не описана."
-        print(f"\n{Colors.OKBLUE}🔧 Найдены shell-команды для применения:{Colors.ENDC}\n" + "-"*20 + f"\n{commands_to_run}\n" + "-"*20)
+        # Логируем найденные команды и стратегию в файл запуска
+        _log_run(f"ИТЕРАЦИЯ {iteration_count}: СТРАТЕГИЯ", strategy_description)
+        _log_run(f"ИТЕРАЦИЯ {iteration_count}: КОМАНДЫ К ВЫПОЛНЕНИЮ (bash)", commands_to_run)
+        # Не засоряем консоль самими командами
+        print(f"\n{Colors.OKBLUE}🔧 Найден блок shell-команд. Пытаюсь выполнить...{Colors.ENDC}")
 
         success, failed_command, error_message = sloth_runner.execute_commands(commands_to_run)
+        # Логируем результат выполнения команд
+        if success:
+            _log_run(f"ИТЕРАЦИЯ {iteration_count}: РЕЗУЛЬТАТ ВЫПОЛНЕНИЯ КОМАНД", "УСПЕХ")
+        else:
+            _log_run(f"ИТЕРАЦИЯ {iteration_count}: РЕЗУЛЬТАТ ВЫПОЛНЕНИЯ КОМАНД", f"ПРОВАЛ\nОшибка: {error_message}\nПровалившийся блок:\n{failed_command}")
         
         project_context = get_project_context()
         if not project_context: 
@@ -290,6 +320,15 @@ if __name__ == "__main__":
             print(f"{Colors.CYAN}🗑️  ЛОГ: Очищена старая история ({HISTORY_FILE}).{Colors.ENDC}")
         except Exception as e:
             print(f"{Colors.WARNING}⚠️  ПРЕДУПРЕЖДЕНИЕ: Не удалось удалить файл истории: {e}{Colors.ENDC}")
+    
+    # Перезаписываем файл лога запуска
+    try:
+        with open(RUN_LOG_FILE, 'w', encoding='utf-8') as f:
+            f.write("# SLOTH RUN LOG\n")
+            f.write(f"Платформа: {platform.system()} | Python: {platform.python_version()}\n")
+            f.write("Этот файл перезаписывается при каждом запуске.\n")
+    except Exception as e:
+        print(f"{Colors.WARNING}⚠️  ПРЕДУПРЕЖДЕНИЕ: Не удалось инициализировать {RUN_LOG_FILE}: {e}{Colors.ENDC}")
     
     final_status = "Работа завершена."
     try:
