@@ -6,6 +6,7 @@ import os
 from colors import Colors
 
 # --- НАСТРОЙКИ ЯДРА ---
+# Читаем ключ из переменных окружения, если он там есть. Иначе используем "захардкоженный".
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "AIzaSyA9kQwlc_fWpgQ64qG6yDJkis7PsgxljCw")
 GOOGLE_CLOUD_PROJECT = "useful-gearbox-464618-v3"
 GOOGLE_CLOUD_LOCATION = "us-central1"
@@ -15,18 +16,28 @@ ALLOWED_COMMANDS = (
     "sed", "rm", "mv", "touch", "mkdir", "npm", "npx", "yarn", "pnpm", "git", "echo", "./", "cat"
 )
 
-# НОВОЕ: Добавляем прайс-лист. Цены указаны в долларах США за 1 МИЛЛИОН токенов.
-# Важно: Эти цены могут меняться. Их стоит периодически сверять с официальной документацией Google.
+# Прайс-лист с многоуровневой структурой.
+# Цены указаны в долларах США за 1 МИЛЛИОН токенов.
 MODEL_PRICING = {
     "gemini-2.5-pro": {
-        "input": 7.00,  # $7.00 per 1M input tokens
-        "output": 21.00 # $21.00 per 1M output tokens
+        "input": {
+            "tiers": [
+                {"up_to": 200000, "price": 1.25},
+                {"up_to": float('inf'), "price": 2.50}
+            ]
+        },
+        "output": {
+            # Цена за выход зависит от общего количества токенов в промпте (вход)
+            "tiers": [
+                {"up_to": 200000, "price": 10.00},
+                {"up_to": float('inf'), "price": 15.00}
+            ]
+        }
     },
     "gemini-1.5-pro-latest": {
-        "input": 3.50,
-        "output": 10.50
+        "input": { "tiers": [{"up_to": float('inf'), "price": 3.50}] },
+        "output": { "tiers": [{"up_to": float('inf'), "price": 10.50}] }
     }
-    # Сюда можно добавлять другие модели в будущем
 }
 
 # --- Глобальные переменные состояния API, управляемые ядром ---
@@ -84,12 +95,11 @@ def get_active_service_details():
     return model, ACTIVE_API_SERVICE
 
 def send_request_to_model(model_instance, active_service, prompt_text, iteration_count):
-    """
-    ИЗМЕНЕНО: Теперь возвращает словарь с текстом и токенами.
-    """
+    """Возвращает словарь с текстом ответа и информацией о токенах."""
     global GOOGLE_AI_HAS_FAILED_THIS_SESSION
     try:
         print(f"{Colors.CYAN}🧠 ЛОГ: [Итерация {iteration_count}] Готовлю запрос в модель ({active_service}).{Colors.ENDC}")
+        # Здесь можно добавить логику для сохранения промпта в debug-файл
         print(f"{Colors.CYAN}⏳ ЛОГ: Отправляю запрос... (таймаут: {API_TIMEOUT_SECONDS} сек){Colors.ENDC}")
         
         response = None
