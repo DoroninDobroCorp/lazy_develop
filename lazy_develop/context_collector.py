@@ -63,7 +63,8 @@ def _should_ignore(path, root_dir):
     path_lower = path.lower()
     base_name = os.path.basename(path_lower)
     sloth_scripts = {
-        "sloth.py"
+        "sloth.py", "sloth_cli.py", "sloth_core.py", "sloth_runner.py", 
+        "context_collector.py", "colors.py", "askgpt.py", "askgpt copy.py"
     }
     if base_name in sloth_scripts: return True
     if base_name in IGNORE_FILES: return True
