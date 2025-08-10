@@ -9,6 +9,7 @@ import subprocess
 import argparse
 from tkinter import Tk, filedialog
 import uuid
+import shutil
 
 from colors import Colors, Symbols
 import sloth_core
@@ -20,26 +21,39 @@ import config as sloth_config
 MAX_ITERATIONS = 20
 HISTORY_FILE_NAME = 'sloth_history.json'
 RUN_LOG_FILE_NAME = 'sloth_run.log'
+PLAN_FILE_NAME = 'sloth_plan.txt'
 # Базовая стартовая папка выбора проекта (уменьшает количество кликов)
 # Может быть переопределена в конфиге: paths.default_start_dir
 DEFAULT_START_DIR = '/Users/vladimirdoronin/VovkaNowEngineer'
 
-def calculate_cost(model_name, input_tokens, output_tokens):
-    pricing_info = sloth_core.MODEL_PRICING.get(model_name)
-    if not pricing_info:
-        return 0.0
-    total_cost = 0.0
-    input_tiers = pricing_info.get("input", {}).get("tiers", [])
-    for tier in input_tiers:
-        if input_tokens <= tier["up_to"]:
-            total_cost += (tier["price"] / 1_000_000) * input_tokens
-            break
-    output_tiers = pricing_info.get("output", {}).get("tiers", [])
-    for tier in output_tiers:
-        if output_tokens <= tier["up_to"]:
-            total_cost += (tier["price"] / 1_000_000) * output_tokens
-            break
-    return total_cost
+def _parse_and_validate_filepath(header_line: str, project_root_dir: str) -> str:
+    """
+    Извлекает и валидирует путь к файлу из полного заголовка write_file.
+    Возвращает безопасный, АБСОЛЮТНЫЙ путь к файлу или вызывает ValueError.
+    """
+    if not header_line.startswith("```write_file"):
+        raise ValueError(f"Некорректный заголовок write_file: отсутствует префикс ```write_file. Получено: '{header_line}'")
+
+    match = re.search(r'path\s*=\s*"([^"]+)"', header_line)
+    if not match:
+        raise ValueError(f"Путь в заголовке не соответствует формату path=\"...\": '{header_line}'")
+    
+    path_from_model = match.group(1).strip()
+
+    if not path_from_model:
+        raise ValueError("Атрибут 'path' в заголовке write_file не может быть пустым.")
+
+    if ".." in path_from_model.split(os.sep) or path_from_model.startswith(('~', '/', '\\')):
+        raise ValueError(f"Недопустимый путь (попытка выхода из директории или абсолютный путь): '{path_from_model}'")
+
+    normalized_path = os.path.normpath(path_from_model)
+    project_root_abs = os.path.abspath(project_root_dir)
+    intended_file_abs = os.path.abspath(os.path.join(project_root_abs, normalized_path))
+    
+    if not intended_file_abs.startswith(project_root_abs):
+        raise ValueError(f"Обнаружена попытка выхода за пределы директории проекта: '{path_from_model}'")
+
+    return intended_file_abs
 
 def get_project_context(is_fast_mode, files_to_include_fully=None):
     print(f"{Colors.CYAN}{Symbols.SPINNER} ЛОГ: Обновляю контекст проекта...{Colors.ENDC}", end='\r', flush=True)
@@ -95,88 +109,38 @@ def get_user_input():
     error_log = _read_multiline_input(log_prompt)
     return user_goal, error_log
 
-def extract_block(tag, text):
-    """Извлекает первый блок вида ```{tag}\n...\n``` или сигнальный блок ```{tag}```."""
-    lines = text.splitlines()
-    start_idx = None
-    fence_prefix = f"```{tag}"
-    for i, line in enumerate(lines):
-        stripped_line = line.strip()
-        if stripped_line.startswith(fence_prefix):
-            # Обрабатываем только самозакрывающиеся "сигнальные" теги, например ```verify_run```.
-            # Обычный открывающий тег (```plan, ```files, ```write_file ...) не должен считаться сигнальным.
-            if stripped_line == f"{fence_prefix}```":
-                return ""  # Сигнал найден, содержимого нет
-            start_idx = i + 1
-            break
-    if start_idx is None:
-        return None
-    # Старая логика для блоков с содержимым остаётся корректной
-    for j in range(start_idx, len(lines)):
-        if lines[j].strip() == "```":
-            return "\n".join(lines[start_idx:j]).strip()
-    return None  # Блок был открыт, но не закрыт
+def parse_all_blocks(text: str) -> list[dict]:
+    """
+    Находит и извлекает все блоки ```tag...``` из текста.
+    Специально обработан для 'write_file' с boundary, чтобы корректно извлекать
+    содержимое файла, даже если оно содержит вложенные ``` блоки.
+    """
+    # Этот паттерн находит ```, тег, заголовок, затем (жадно) ВЕСЬ контент до финального ```
+    pattern = re.compile(r"```(\w+)([^\n]*)?\n(.*?)\n```", re.DOTALL)
+    
+    blocks = []
+    for match in pattern.finditer(text):
+        block_type = match.group(1).strip()
+        header_args = (match.group(2) or "").strip()
+        full_header = f"```{block_type} {header_args}".strip()
+        content = match.group(3)  # Сначала берем весь контент "как есть"
 
-_ALLOWED_TAGS_AFTER_FENCE = {"summary","bash","manual","files","plan","clarification","done_summary","write_file","verify_run"}
+        # НОВАЯ ЛОГИКА: Проверяем, есть ли в этом блоке boundary
+        if block_type == 'write_file':
+            boundary_match = re.search(r'boundary\s*=\s*"([^"]+)"', header_args)
+            if boundary_match:
+                boundary = boundary_match.group(1)
+                # Если контент заканчивается на boundary, отрезаем его
+                # Используем split, чтобы безопасно отделить контент от границы
+                if content.endswith(boundary):
+                    content = content.rsplit(boundary, 1)[0].rstrip('\r\n')
 
-def _parse_write_file_header(header_line: str):
-    header = header_line.strip()
-    if header.startswith("```write_file"):
-        header = header[len("```write_file"):].strip()
-    path, boundary = "", None
-    m = re.search(r'boundary\s*=\s*"([^"]+)"', header) or re.search(r'boundary\s*=\s*([^\s]+)', header)
-    if m: boundary = m.group(1).strip().strip('"').strip("'")
-    p = re.search(r'path\s*=\s*"([^"]+)"', header) or re.search(r'path\s*=\s*([^\s]+)', header)
-    if p: path = p.group(1).strip().strip('"').strip("'")
-    else:
-        for tok in header.split():
-            if "=" not in tok:
-                path = tok.strip().strip('"').strip("'"); break
-    return path, boundary
-
-def _iter_write_file_blocks(answer_text: str, boundary_token: str):
-    lines, i, n = answer_text.splitlines(), 0, len(answer_text.splitlines())
-    while i < n:
-        ln = lines[i].strip()
-        if ln.startswith("```write_file"):
-            filepath, boundary = _parse_write_file_header(ln)
-            i += 1
-            content = []
-            if boundary:  # главный путь: читаем до строки-границы
-                while i < n and lines[i].strip() != boundary:
-                    content.append(lines[i]); i += 1
-                if i < n and lines[i].strip() == boundary: i += 1
-                if i < n and lines[i].strip() == "```": i += 1
-                yield filepath, "\n".join(content); continue
-            # fallback: закрытие только если после ``` реально начинается новый блок
-            while i < n:
-                if lines[i].strip() == "```":
-                    j = i + 1
-                    while j < n and lines[j].strip() == "": j += 1
-                    if j >= n: break
-                    nxt = lines[j].strip()
-                    if nxt.startswith("```"): break
-                    if any(nxt.startswith(t) or nxt.startswith(f"```{t}") for t in _ALLOWED_TAGS_AFTER_FENCE):
-                        break
-                    content.append(lines[i]); i += 1; continue
-                content.append(lines[i]); i += 1
-            if i < n and lines[i].strip() == "```": i += 1
-            yield filepath, "\n".join(content); continue
-        i += 1
-
-def _normalize_model_path(p: str) -> str:
-    p = (p or "").strip().strip('"').strip("'").replace("\\","/")
-    if p.startswith("./"): p = p[2:]
-    cwd = os.getcwd(); root = os.path.basename(cwd.rstrip(os.sep))
-    cwd_posix = cwd.replace("\\","/").rstrip("/")
-    if p.startswith("/"):
-        if p.startswith(cwd_posix + "/"): p = p[len(cwd_posix)+1:]
-        else: p = p.lstrip("/")
-    if p.startswith(root + "/"): p = p[len(root)+1:]
-    p = os.path.normpath(p).replace("\\","/")
-    if p.startswith("../"): p = p[3:]
-    if p == ".": p = ""
-    return p
+        blocks.append({
+            "type": block_type,
+            "header": full_header,
+            "content": content
+        })
+    return blocks
 
 def update_history_with_attempt(history_file_path, goal, summary):
     try:
@@ -237,13 +201,27 @@ def cost_report(cost_log, total_cost):
             print(f"  Фаза: {phase:<12} | Итерация: {iteration:<2} | Стоимость: ${cost:.6f}", flush=True)
     print(f"{Colors.BOLD}\n  Общая стоимость задачи: ${total_cost:.6f}{Colors.ENDC}", flush=True)
 
-def main(is_fix_mode, is_fast_mode, history_file_path, run_log_file_path, verify_timeout_seconds=15, log_trim_limit=20000):
-    # Модель инициализируется в точке входа до вызова этой функции.
-    model_instance, active_service = sloth_core.get_active_service_details()
-    if not model_instance:
-        # Этот проверка - мера предосторожности, основная точка входа уже должна была это проверить.
-        return f"{Colors.FAIL}Не удалось получить данные об инициализированной модели. Выход.{Colors.ENDC}"
+def calculate_cost(model_name, input_tokens, output_tokens):
+    """
+    Простейший расчёт стоимости на основе переменных окружения.
+    Используются ставки за 1000 токенов:
+      - SLOTH_COST_IN_RATE  (по умолчанию 0)
+      - SLOTH_COST_OUT_RATE (по умолчанию 0)
+    Если ставки не заданы, возвращает 0.0.
+    """
+    try:
+        in_rate = float(os.getenv("SLOTH_COST_IN_RATE", "0"))
+        out_rate = float(os.getenv("SLOTH_COST_OUT_RATE", "0"))
+    except Exception:
+        in_rate, out_rate = 0.0, 0.0
+    try:
+        in_tokens = float(input_tokens or 0)
+        out_tokens = float(output_tokens or 0)
+    except Exception:
+        in_tokens, out_tokens = 0.0, 0.0
+    return (in_tokens / 1000.0) * in_rate + (out_tokens / 1000.0) * out_rate
 
+def main(is_fix_mode, is_fast_mode, history_file_path, run_log_file_path, plan_file_path, verify_timeout_seconds=15, log_trim_limit=20000):
     total_start_time = time.time()
     timings = {'context': 0.0, 'model': 0.0, 'commands': 0.0, 'verify': 0.0}
     total_cost, cost_log = 0.0, []
@@ -253,91 +231,89 @@ def main(is_fix_mode, is_fast_mode, history_file_path, run_log_file_path, verify
         return f"{Colors.WARNING}Цель не была указана. Завершение работы.{Colors.ENDC}"
     initial_task = user_goal + (f"\n\n--- ЛОГ ОШИБКИ ---\n{error_log}" if error_log else "")
     
-    attempt_history, final_message = [], ""
-    state = "EXECUTION" if is_fast_mode else "PLANNING"
-    iteration_count, files_to_include_fully, current_prompt = 1, None, None
-    current_prompt_type = None  # one of: planning, initial, review, error_fix, log_analysis
+    # --- State Machine Setup ---
+    state = "INITIAL_CODING" if is_fast_mode else "PLANNING"
+    if is_fix_mode:
+        state = "INITIAL_CODING"
 
-    # Генерируем уникальный токен-границу для write_file
+    iteration_count = 1
+    attempt_history, final_message = [], ""
     BOUNDARY_TOKEN = f"SLOTH_BOUNDARY_{uuid.uuid4().hex}"
 
-    # --- Конфигурация verify_command (спросить ОДИН раз за сессию, только в интеллектуальном режиме) ---
+    # Variables to pass data between states
+    files_to_include_fully = None
+    failed_command, error_message, logs_collected = None, None, None
+
+    # --- Verify Command Setup ---
     verify_command = None
     try:
+        # Simplified setup logic, assumes last_run_config exists if history does
         if os.path.exists(history_file_path):
             with open(history_file_path, 'r', encoding='utf-8') as f:
-                _hist = json.load(f)
-        else:
-            _hist = {}
-        last_cfg = (_hist.get("last_run_config") or {})
-        verify_command = last_cfg.get("verify_command")
+                verify_command = json.load(f).get("last_run_config", {}).get("verify_command")
+        
         if not is_fast_mode and verify_command is None:
             print(f"{Colors.OKBLUE}Вопрос: Какую команду использовать для запуска и проверки проекта (например, 'npm run dev' или 'pytest')? Если автоматическая проверка не нужна, просто нажмите Enter.{Colors.ENDC}", flush=True)
-            try:
-                verify_command = input().strip()
-            except EOFError:
-                verify_command = ""
-            # Сохраняем ответ (даже пустой), чтобы больше не спрашивать
-            last_cfg["verify_command"] = verify_command
-            _hist["last_run_config"] = last_cfg
-            with open(history_file_path, 'w', encoding='utf-8') as f:
-                json.dump(_hist, f, indent=2, ensure_ascii=False)
+            verify_command = input().strip() or "" # Default to empty string
+            # Save for the session
+            if os.path.exists(history_file_path):
+                with open(history_file_path, 'r+', encoding='utf-8') as f:
+                    _hist = json.load(f)
+                    _hist.setdefault("last_run_config", {})["verify_command"] = verify_command
+                    f.seek(0)
+                    json.dump(_hist, f, indent=2, ensure_ascii=False)
+                    f.truncate()
             print(f"{Colors.CYAN}{Symbols.SAVE} Команда верификации сохранена в историю сессии.{Colors.ENDC}", flush=True)
     except Exception as e:
         print(f"{Colors.WARNING}{Symbols.WARNING}  ПРЕДУПРЕЖДЕНИЕ: Не удалось обработать verify_command: {e}{Colors.ENDC}", flush=True)
 
-    while iteration_count <= MAX_ITERATIONS:
+    while iteration_count <= MAX_ITERATIONS and state != "DONE":
         model_instance, active_service = sloth_core.get_active_service_details()
 
+        # --- 1. GENERATE PROMPT BASED ON STATE ---
+        current_prompt = None
+        log_iter = iteration_count if state != "PLANNING" else 0
+        
         if state == "PLANNING":
             print(f"\n{Colors.BOLD}{Colors.HEADER}--- ЭТАП: ПЛАНИРОВАНИЕ ---{Colors.ENDC}", flush=True)
             project_context, duration = get_project_context(is_fast_mode=False, files_to_include_fully=None)
             timings['context'] += duration
-            if not project_context:
-                return f"{Colors.FAIL}КРИТИЧЕСКАЯ ОШИБКА: Не удалось получить контекст проекта.{Colors.ENDC}"
-            current_prompt = sloth_core.get_clarification_and_planning_prompt(project_context, initial_task, boundary=BOUNDARY_TOKEN)
-            current_prompt_type = "planning"
-        
-        elif state == "EXECUTION" and current_prompt is None:
+            if project_context:
+                current_prompt = sloth_core.get_clarification_and_planning_prompt(project_context, initial_task, boundary=BOUNDARY_TOKEN)
+        else: # Any execution state
+            print(f"\n{Colors.BOLD}{Colors.HEADER}{Symbols.ROCKET} --- ЭТАП: ИСПОЛНЕНИЕ ({state}) | ИТЕРАЦИЯ {iteration_count}/{MAX_ITERATIONS} ---{Colors.ENDC}", flush=True)
             project_context, duration = get_project_context(is_fast_mode, files_to_include_fully)
             timings['context'] += duration
-            if not project_context:
-                return f"{Colors.FAIL}КРИТИЧЕСКАЯ ОШИБКА: Не удалось обновить контекст.{Colors.ENDC}"
-            current_prompt = sloth_core.get_initial_prompt(
-                project_context, initial_task,
-                sloth_core.get_active_service_details() and (load_fix_history(history_file_path) if is_fix_mode else None),
-                boundary=BOUNDARY_TOKEN
-            )
-            current_prompt_type = "initial"
+            if project_context:
+                if state == "INITIAL_CODING":
+                    fix_history = load_fix_history(history_file_path) if is_fix_mode else None
+                    current_prompt = sloth_core.get_initial_prompt(project_context, initial_task, fix_history, BOUNDARY_TOKEN)
+                elif state == "REVIEWING":
+                    current_prompt = sloth_core.get_review_prompt(project_context, initial_task, iteration_count, attempt_history, BOUNDARY_TOKEN)
+                elif state == "FIXING_ERROR":
+                    current_prompt = sloth_core.get_error_fixing_prompt(failed_command, error_message, initial_task, project_context, iteration_count, attempt_history, BOUNDARY_TOKEN)
+                elif state == "ANALYZING_LOGS":
+                    current_prompt = sloth_core.get_log_analysis_prompt(project_context, initial_task, attempt_history, logs_collected, BOUNDARY_TOKEN)
             
-        log_iter = iteration_count if state == "EXECUTION" else 0
-        if state == "EXECUTION":
-            print(f"\n{Colors.BOLD}{Colors.HEADER}{Symbols.ROCKET} --- ЭТАП: ИСПОЛНЕНИЕ | ИТЕРАЦИЯ {iteration_count}/{MAX_ITERATIONS} ---{Colors.ENDC}", flush=True)
+        if not project_context:
+            final_message = f"{Colors.FAIL}КРИТИЧЕСКАЯ ОШИБКА: Не удалось получить контекст проекта.{Colors.ENDC}"
+            break
         
         _log_run(run_log_file_path, f"ЗАПРОС (Состояние: {state}, Итерация: {log_iter})", current_prompt)
-        # Явные логи перед отправкой запроса к модели, чтобы было видно прогресс
-        if state == "EXECUTION":
-            try:
-                service_name = str(active_service)
-            except Exception:
-                service_name = "AI Service"
-            print(f"{Colors.OKBLUE}🧠 ЛОГ: [Итерация {log_iter}] Готовлю запрос в модель ({service_name}).{Colors.ENDC}", flush=True)
-            print(f"{Colors.OKBLUE}⏳ ЛОГ: Отправляю запрос... (таймаут: 600 сек){Colors.ENDC}", flush=True)
+        # Лог подготовки запроса печатается в sloth_core.send_request_to_model(); здесь не дублируем
         print(f"{Colors.CYAN}{Symbols.SPINNER} Думаю...{Colors.ENDC}", end='\r', flush=True)
         start_model_time = time.time()
+        
+        # --- 2. SEND REQUEST TO MODEL ---
         answer_data = sloth_core.send_request_to_model(model_instance, active_service, current_prompt, log_iter)
         model_duration = time.time() - start_model_time
         timings['model'] += model_duration
-        
-        if not answer_data:
-            if sloth_core.model:
-                print(f"{Colors.WARNING}🔄 ЛОГ: Ответ от модели не получен, пробую снова...{Colors.ENDC}", flush=True)
-                time.sleep(5)
-                continue
-            else:
-                final_message = "Критическая ошибка: Не удалось получить ответ и нет запасного API."
-                break
 
+        if not answer_data:
+            print(f"{Colors.WARNING}🔄 ЛОГ: Ответ от модели не получен, пробую снова...{Colors.ENDC}", flush=True)
+            time.sleep(5)
+            continue
+        
         answer_text = answer_data["text"]
         _log_run(run_log_file_path, f"ОТВЕТ (Состояние: {state}, Итерация: {log_iter})", answer_text)
 
@@ -346,176 +322,134 @@ def main(is_fix_mode, is_fast_mode, history_file_path, run_log_file_path, verify
         cost_log.append({"phase": state, "iteration": log_iter, "cost": cost})
         print(f"{Colors.GREY}📊 Статистика: Вход: {answer_data['input_tokens']} т., Выход: {answer_data['output_tokens']} т. | Время: {model_duration:.2f} сек. | Стоимость: ~${cost:.6f}{' '*10}{Colors.ENDC}", flush=True)
 
+        # --- 3. PROCESS RESPONSE AND DETERMINE NEXT STATE ---
+        # --- НОВЫЙ, НАДЕЖНЫЙ КОД ---
         if state == "PLANNING":
-            clarification = extract_block("clarification", answer_text)
-            if clarification:
+            # Логика для планирования используется новый парсер для единообразия.
+            all_plan_blocks = parse_all_blocks(answer_text)
+            clarification_block = next((b for b in all_plan_blocks if b['type'] == 'clarification'), None)
+            
+            if clarification_block:
+                clarification = clarification_block['content']
                 print(f"{Colors.HEADER}{Colors.BOLD}🤖 Модель просит уточнений:{Colors.ENDC}\n{Colors.CYAN}{clarification}{Colors.ENDC}", flush=True)
                 user_response = _read_multiline_input("Пожалуйста, предоставьте ответ на вопросы модели. (Enter 3 раза для завершения)")
                 initial_task += f"\n\n--- УТОЧНЕНИЕ ОТ ПОЛЬЗОВАТЕЛЯ ---\n{user_response}"
-                current_prompt = None
+                state = "PLANNING" # Loop in planning state
                 continue
 
-            plan = extract_block("plan", answer_text)
-            files_list_str = extract_block("files", answer_text)
-            if plan and files_list_str:
+            plan_block = next((b for b in all_plan_blocks if b['type'] == 'plan'), None)
+            files_block = next((b for b in all_plan_blocks if b['type'] == 'files'), None)
+
+            if plan_block and files_block:
+                plan = plan_block['content']
+                files_list_str = files_block['content']
                 print(f"{Colors.OKGREEN}✅ Задача понятна. План получен.{Colors.ENDC}\n{Colors.HEADER}План действий:{Colors.ENDC}\n{Colors.CYAN}{plan}{Colors.ENDC}", flush=True)
-                with open("sloth_plan.txt", "w", encoding='utf-8') as f:
-                    f.write(plan)
-                print(f"{Colors.OKGREEN}План сохранен в 'sloth_plan.txt'.{Colors.ENDC}", flush=True)
-                raw_files_list = [line.strip() for line in files_list_str.split('\n') if line.strip()]
-                project_root_name = os.path.basename(os.getcwd()) + os.sep
-                files_to_include_fully = []
-                for f_path in raw_files_list:
-                    if f_path.startswith(project_root_name):
-                        normalized_path = f_path[len(project_root_name):]
-                        files_to_include_fully.append(normalized_path)
-                        print(f"{Colors.GREY}ℹ️  Путь нормализован: '{f_path}' -> '{normalized_path}'{Colors.ENDC}", flush=True)
-                    else:
-                        files_to_include_fully.append(f_path)
+                with open(plan_file_path, "w", encoding='utf-8') as f: f.write(plan)
+                
+                raw_files_list = [line.strip() for line in files_list_str.split('\n') if line.strip() and not line.strip().startswith('- ')]
+                # Здесь _normalize_model_path больше не нужен, валидация будет на этапе записи
+                files_to_include_fully = raw_files_list
+
                 print(f"{Colors.HEADER}Запрошены полные версии файлов:{Colors.ENDC}\n{Colors.CYAN}" + "\n".join(files_to_include_fully) + Colors.ENDC, flush=True)
-                state = "EXECUTION"
-                current_prompt = None
-                current_prompt_type = None
-                continue
+                state = "INITIAL_CODING"
             else:
                 print(f"{Colors.WARNING}⚠️ Модель не вернула ни уточнений, ни плана. Пробуем снова...{Colors.ENDC}", flush=True)
                 time.sleep(5)
-                continue
+                state = "PLANNING"
+        else: # Любое состояние исполнения
+            all_blocks = parse_all_blocks(answer_text)
 
-        elif state == "EXECUTION":
-            # --- СНАЧАЛА ОБРАБАТЫВАЕМ ДЕЙСТВИЯ: write_file или bash ---
-            commands_to_run = extract_block("bash", answer_text)
-            write_blocks = list(_iter_write_file_blocks(answer_text, boundary_token=BOUNDARY_TOKEN))
-            strategy_description = extract_block("summary", answer_text) or "Стратегия не описана"
-            verify_run_present = (extract_block("verify_run", answer_text) is not None)
-            
-            # Извлекаем done_summary заранее, но используем позже
-            done_summary_text = extract_block("done_summary", answer_text)
-            is_done = done_summary_text is not None or answer_text.strip().upper().startswith("ГОТОВО")
+            strategy_description = next((b['content'] for b in all_blocks if b['type'] == 'summary'), "Стратегия не описана")
+            commands_to_run_block = next((b for b in all_blocks if b['type'] == 'bash'), None)
+            write_file_blocks = [b for b in all_blocks if b['type'] == 'write_file']
+            verify_run_present = any(b['type'] == 'verify_run' for b in all_blocks)
+            done_summary_block = next((b for b in all_blocks if b['type'] == 'done_summary'), None)
+            is_done = done_summary_block is not None
 
-            action_taken, success, failed_command, error_message = False, False, "N/A", ""
+            action_taken, success = False, False
 
-            if write_blocks:
+            if write_file_blocks:
                 action_taken = True
-                for raw_filepath, content in write_blocks:
+                for block in write_file_blocks:
                     try:
-                        filepath = _normalize_model_path(raw_filepath)
-                        print(f"\n{Colors.OKBLUE}📝 Найден блок write_file. Перезаписываю файл: {filepath}{Colors.ENDC}", flush=True)
-                        dir_name = os.path.dirname(filepath)
-                        if dir_name:
-                            os.makedirs(dir_name, exist_ok=True)
-                        abs_path = os.path.realpath(filepath)
-                        root_abs = os.path.realpath(os.getcwd())
-                        if not abs_path.startswith(root_abs + os.sep) and not abs_path == root_abs:  # Разрешаем запись в корень
-                            raise RuntimeError(f"Запрещён путь вне корня проекта: {filepath}")
-                        with open(filepath, "w", encoding="utf-8", newline="") as f:
-                            f.write(content)
-                        print(f"{Colors.OKGREEN}✅ Файл успешно перезаписан: {filepath}{Colors.ENDC}", flush=True)
-                        success = True
-                    except Exception as e:
-                        print(f"{Colors.FAIL}❌ ОШИБКА при записи файла '{raw_filepath}': {e}{Colors.ENDC}", flush=True)
-                        success = False
-                        failed_command = f"write_file {raw_filepath}"
-                        error_message = str(e)
-                        break
-
-            elif commands_to_run:
-                action_taken = True
-                print(f"\n{Colors.OKBLUE}🔧 Найден блок shell-команд. Выполняю...{Colors.ENDC}", flush=True)
-                start_cmd_time = time.time()
-                success, failed_command, error_message = sloth_runner.execute_commands(commands_to_run)
-                cmd_duration = time.time() - start_cmd_time
-                timings['commands'] += cmd_duration
-                print(f"{Colors.GREY}ℹ️  Команды выполнены за {cmd_duration:.2f} сек.{Colors.ENDC}", flush=True)
-
-            # --- ТЕПЕРЬ ПРОВЕРЯЕМ, ЗАВЕРШЕНА ЛИ ЗАДАЧА ---
-            # Если было совершено действие И модель сказала, что это конец, то выходим.
-            if action_taken and is_done:
-                final_message = f"{Colors.OKGREEN}{Symbols.CHECK} Задача выполнена успешно! (за {iteration_count} итераций){Colors.ENDC}"
-                update_history_with_attempt(history_file_path, user_goal, done_summary_text or "Задача выполнена.")
-                print(f"{Colors.OKGREEN}📄 ИТОГОВОЕ РЕЗЮМЕ:\n{Colors.CYAN}{done_summary_text or 'Нет резюме.'}{Colors.ENDC}", flush=True)
-                manual_steps = extract_block("manual", answer_text)
-                if manual_steps:
-                    final_message += f"\n\n{Colors.WARNING}✋ ТРЕБУЮТСЯ РУЧНЫЕ ДЕЙСТВИЯ:{Colors.ENDC}\n{manual_steps}"
-                break
-            
-            # Если действий не было, НО модель сказала "ГОТОВО", тоже выходим.
-            if not action_taken and is_done:
-                final_message = f"{Colors.OKGREEN}{Symbols.CHECK} Задача отмечена как выполненная моделью без совершения действий. (за {iteration_count} итераций){Colors.ENDC}"
-                update_history_with_attempt(history_file_path, user_goal, done_summary_text or "Задача выполнена.")
-                break
-
-            # Если действий не было и задача не завершена - это ошибка логики модели
-            if not action_taken and not is_done:
-                print(f"{Colors.FAIL}❌ ЛОГ: Модель не вернула ни команд, ни сигнала о завершении. Пробую на следующей итерации.{Colors.ENDC}", flush=True)
-                project_context, duration = get_project_context(is_fast_mode, files_to_include_fully)
-                timings['context'] += duration
-                current_prompt = sloth_core.get_review_prompt(project_context, user_goal, iteration_count + 1, attempt_history, boundary=BOUNDARY_TOKEN)
-                current_prompt_type = "review"
-                iteration_count += 1
-                continue
-
-            # (Остальная часть логики обработки success/failure и подготовки следующего промпта остается здесь)
-            project_context, duration = get_project_context(is_fast_mode, files_to_include_fully)
-            timings['context'] += duration
-            if not project_context:
-                final_message = f"{Colors.FAIL}Критическая ошибка: не удалось обновить контекст.{Colors.ENDC}"
-                break
-
-            history_entry = f"**Итерация {iteration_count}:**\n**Стратегия:** {strategy_description}\n"
-            if success:
-                history_entry += "**Результат:** УСПЕХ"
-                # Если ИИ запросил верификацию и задана команда — запускаем проект и собираем логи
-                if verify_run_present and (verify_command or verify_command == ""):
-                    if verify_command:
-                        print(f"{Colors.OKBLUE}🧪 Запускаю команду верификации на {verify_timeout_seconds} сек: {verify_command}{Colors.ENDC}", flush=True)
-                        start_verify_time = time.time()
-                        try:
-                            proc = subprocess.Popen(verify_command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                            try:
-                                stdout, stderr = proc.communicate(timeout=verify_timeout_seconds)
-                                rc = proc.returncode
-                            except subprocess.TimeoutExpired:
-                                print(f"{Colors.CYAN}{Symbols.INFO}  Процесс верификации работал до таймаута, как и ожидалось для dev-сервера.{Colors.ENDC}", flush=True)
-                                proc.kill()
-                                stdout, stderr = proc.communicate()
-                                rc = proc.returncode if proc.returncode is not None else 124
-                                # stderr больше не помечаем как ошибку, а просто передаем как есть
-                        except Exception as e:
-                            stdout, stderr, rc = "", f"Ошибка запуска verify_command: {e}", -1
+                        safe_filepath = _parse_and_validate_filepath(block['header'], os.getcwd())
+                        relative_path_for_display = os.path.relpath(safe_filepath, os.getcwd())
                         
-                        verify_duration = time.time() - start_verify_time
-                        timings['verify'] += verify_duration
-
-                        # Обрезаем логи, чтобы не раздувать промпт
-                        def _trim(s, lim=log_trim_limit):
-                            if not s:
-                                return ""
-                            return (s[:lim] + "\n...[TRIMMED]...") if len(s) > lim else s
-                        logs_collected = f"$ {verify_command}\n(exit={rc})\n\n[STDOUT]\n{_trim(stdout)}\n\n[STDERR]\n{_trim(stderr)}"
-                        _log_run(run_log_file_path, "ЛОГИ ВЕРИФИКАЦИИ", logs_collected)
-                        # Готовим промпт для анализа логов
-                        attempts_str = "\n---\n".join(attempt_history) if attempt_history else ""
-                        current_prompt = sloth_core.get_log_analysis_prompt(project_context, user_goal, attempts_str, logs_collected, boundary=BOUNDARY_TOKEN)
-                        current_prompt_type = "log_analysis"
-                    else:
-                        print(f"{Colors.GREY}{Symbols.INFO} Блок verify_run обнаружен, но команда верификации не задана. Пропускаю запуск.{Colors.ENDC}", flush=True)
-                        current_prompt = sloth_core.get_review_prompt(project_context, user_goal, iteration_count + 1, attempt_history, boundary=BOUNDARY_TOKEN)
-                        current_prompt_type = "review"
-                else:
-                    current_prompt = sloth_core.get_review_prompt(project_context, user_goal, iteration_count + 1, attempt_history, boundary=BOUNDARY_TOKEN)
-                    current_prompt_type = "review"
-            else:
-                history_entry += f"**Результат:** ПРОВАЛ\n**Ошибка:** {error_message}"
-                current_prompt = sloth_core.get_error_fixing_prompt(
-                    failed_command, error_message, user_goal, project_context, iteration_count + 1, attempt_history, boundary=BOUNDARY_TOKEN
-                )
-                current_prompt_type = "error_fix"
+                        # --- ДОБАВЛЕНА ПРОВЕРКА ---
+                        # Защита от случайного стирания файла
+                        if not block['content'] and os.path.exists(safe_filepath):
+                            print(f"{Colors.WARNING}⚠️  ПРЕДУПРЕЖДЕНИЕ: Модель предложила очистить существующий файл {relative_path_for_display}. Действие пропущено.{Colors.ENDC}", flush=True)
+                            continue # Переходим к следующему файлу, не выполняя запись
+                        # --- КОНЕЦ ПРОВЕРКИ ---
+                        
+                        print(f"\n{Colors.OKBLUE}📝 Перезаписываю файл: {relative_path_for_display}{Colors.ENDC}", flush=True)
+                        os.makedirs(os.path.dirname(safe_filepath), exist_ok=True)
+                        with open(safe_filepath, "w", encoding="utf-8", newline="") as f:
+                            f.write(block['content'])
+                        
+                        print(f"{Colors.OKGREEN}✅ Файл успешно перезаписан: {relative_path_for_display}{Colors.ENDC}", flush=True)
+                        success = True
+                    except ValueError as e:
+                        print(f"{Colors.FAIL}❌ ОШИБКА ВАЛИДАЦИИ: {e}{Colors.ENDC}", flush=True)
+                        success, failed_command, error_message = False, f"write_file ({block['header']})", str(e)
+                        break
+                    except Exception as e:
+                        print(f"{Colors.FAIL}❌ ОШИБКА при записи файла '{block['header']}': {e}{Colors.ENDC}", flush=True)
+                        success, failed_command, error_message = False, f"write_file ({block['header']})", str(e)
+                        break
             
+            elif commands_to_run_block:
+                action_taken = True
+                print(f"\n{Colors.OKBLUE}🔧 Выполняю shell-команды...{Colors.ENDC}", flush=True)
+                start_cmd_time = time.time()
+                success, failed_command, error_message = sloth_runner.execute_commands(commands_to_run_block['content'])
+                timings['commands'] += time.time() - start_cmd_time
+
+            # --- Логика определения следующего состояния (остаётся в основном без изменений) ---
+            history_entry = f"**Итерация {iteration_count} ({state}):**\n**Стратегия:** {strategy_description}\n"
+
+            if is_done:
+                final_message = f"{Colors.OKGREEN}{Symbols.CHECK} Задача выполнена успешно! (за {iteration_count} итераций){Colors.ENDC}"
+                done_summary_text = done_summary_block['content'] if done_summary_block else "Задача выполнена."
+                update_history_with_attempt(history_file_path, user_goal, done_summary_text)
+                print(f"{Colors.OKGREEN}📄 ИТОГОВОЕ РЕЗЮМЕ:\n{Colors.CYAN}{done_summary_text or 'Нет резюме.'}{Colors.ENDC}", flush=True)
+                manual_block = next((b for b in all_blocks if b['type'] == 'manual'), None)
+                if manual_block:
+                    final_message += f"\n\n{Colors.WARNING}✋ ТРЕБУЮТСЯ РУЧНЫЕ ДЕЙСТВИЯ:{Colors.ENDC}\n{manual_block['content']}"
+                state = "DONE"
+            elif not action_taken:
+                print(f"{Colors.FAIL}❌ ЛОГ: Модель не вернула ни команд, ни файла. Перехожу к анализу.{Colors.ENDC}", flush=True)
+                history_entry += "**Результат:** ПРОВАЛ (нет действий)\n**Ошибка:** Модель не сгенерировала действий."
+                state = "REVIEWING"
+            elif success:
+                history_entry += "**Результат:** УСПЕХ"
+                if verify_run_present and verify_command is not None:
+                    print(f"{Colors.OKBLUE}🧪 Запускаю верификацию: {verify_command}{Colors.ENDC}", flush=True)
+                    start_verify_time = time.time()
+                    try:
+                        proc = subprocess.Popen(verify_command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8')
+                        stdout, stderr = proc.communicate(timeout=verify_timeout_seconds)
+                        rc = proc.returncode
+                    except subprocess.TimeoutExpired:
+                        proc.kill(); stdout, stderr = proc.communicate(); rc = 124
+                    except Exception as e:
+                        stdout, stderr, rc = "", f"Ошибка запуска verify_command: {e}", -1
+                    timings['verify'] += time.time() - start_verify_time
+                    def _trim(s, lim=log_trim_limit): return (s[:lim] + "\n...[TRIMMED]...") if len(s) > lim else s
+                    logs_collected = f"$ {verify_command}\n(exit={rc})\n\n[STDOUT]\n{_trim(stdout)}\n\n[STDERR]\n{_trim(stderr)}"
+                    _log_run(run_log_file_path, "ЛОГИ ВЕРИФИКАЦИИ", logs_collected)
+                    state = "ANALYZING_LOGS"
+                else:
+                    if verify_run_present: print(f"{Colors.GREY}{Symbols.INFO} verify_run есть, но команда не задана. Пропускаю.{Colors.ENDC}", flush=True)
+                    state = "REVIEWING"
+            else: # failure
+                history_entry += f"**Результат:** ПРОВАЛ\n**Ошибка:** {error_message}"
+                state = "FIXING_ERROR"
+
             attempt_history.append(history_entry)
             iteration_count += 1
-    
-    if not final_message:
+
+    if state != "DONE":
         final_message = f"{Colors.WARNING}⌛ Достигнут лимит в {MAX_ITERATIONS} итераций.{Colors.ENDC}"
     
     time_report(timings, total_start_time)
@@ -533,6 +467,20 @@ if __name__ == "__main__":
     parser.add_argument('--log-trim-limit', type=int, default=None, help='Лимит символов для обрезки stdout/stderr в логах (env SLOTH_LOG_TRIM_LIMIT, по умолчанию 20000).')
     args = parser.parse_args()
 
+    # --- Управление директорией логов ---
+    LOGS_DIR = os.path.join(SLOTH_SCRIPT_DIR, 'logs')
+    # Если запуск не в режиме исправления, очистить предыдущие логи
+    if not args.fix:
+        if os.path.exists(LOGS_DIR):
+            shutil.rmtree(LOGS_DIR)
+        os.makedirs(LOGS_DIR)
+        # Добавить .gitignore, чтобы логи не попадали в Git
+        with open(os.path.join(LOGS_DIR, '.gitignore'), 'w', encoding='utf-8') as f:
+            f.write('*\n')
+    else:
+        # В режиме исправления просто убедимся, что директория существует
+        os.makedirs(LOGS_DIR, exist_ok=True)
+
     # --- 1. Инициализация модели ---
     sloth_core.initialize_model()
     model_instance, _ = sloth_core.get_active_service_details()
@@ -543,7 +491,7 @@ if __name__ == "__main__":
     print(f"{Colors.OKGREEN}✅ Модель AI успешно инициализирована.{Colors.ENDC}\n", flush=True)
 
     # --- 2. Определение пути к проекту ---
-    history_file_path = os.path.join(SLOTH_SCRIPT_DIR, HISTORY_FILE_NAME)
+    history_file_path = os.path.join(LOGS_DIR, HISTORY_FILE_NAME)
     target_project_path, is_fast_mode = "", args.fast
 
     if args.fix:
@@ -586,7 +534,8 @@ if __name__ == "__main__":
     # --- 3. Переход в директорию и запуск ---
     print(f"{Colors.OKGREEN}{Symbols.CHECK} Рабочая директория проекта: {target_project_path}{Colors.ENDC}", flush=True)
     os.chdir(target_project_path)
-    run_log_file_path = os.path.join(SLOTH_SCRIPT_DIR, RUN_LOG_FILE_NAME)
+    run_log_file_path = os.path.join(LOGS_DIR, RUN_LOG_FILE_NAME)
+    plan_file_path = os.path.join(LOGS_DIR, PLAN_FILE_NAME)
     try:
         with open(run_log_file_path, 'w', encoding='utf-8') as f:
             f.write(f"# SLOTH RUN LOG\n# Целевой проект: {target_project_path}\n# Режим: {'Быстрый' if is_fast_mode else 'Интеллектуальный'}\n")
@@ -606,6 +555,7 @@ if __name__ == "__main__":
             is_fast_mode=is_fast_mode,
             history_file_path=history_file_path,
             run_log_file_path=run_log_file_path,
+            plan_file_path=plan_file_path,
             verify_timeout_seconds=verify_timeout_seconds,
             log_trim_limit=log_trim_limit,
         )
