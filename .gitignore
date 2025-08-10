@@ -1,0 +1,6 @@
+# Ignore local config (real secrets/paths)
+sloth_config.json
+
+# Python caches (optional, handy)
+__pycache__/
+*.pyc

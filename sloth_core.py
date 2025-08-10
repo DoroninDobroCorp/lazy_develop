@@ -16,7 +16,9 @@
 """
 
 import os
+from typing import Any, Dict
 from colors import Colors
+import config as sloth_config
 
 # --- Попытка использовать новый Google GenAI SDK (предпочтительно) ---
 HAS_GOOGLE_GENAI = False
@@ -53,21 +55,59 @@ except Exception:
     VertexThinkingConfig = None
 
 # --- НАСТРОЙКИ ЯДРА ---
+<<<<<<< HEAD
 GOOGLE_API_KEY = os.environ["GOOGLE_API_KEY"]
 GOOGLE_CLOUD_PROJECT = os.getenv("GOOGLE_CLOUD_PROJECT", "useful-gearbox-464618-v3")
 GOOGLE_CLOUD_LOCATION = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
 MODEL_NAME = os.getenv("SLOTH_MODEL_NAME", "gemini-2.5-pro")
 API_TIMEOUT_SECONDS = int(os.getenv("SLOTH_API_TIMEOUT", "600"))
+=======
+def _pick_cfg(path: str, env_name: str, default: Any) -> Any:
+    v = sloth_config.get(path, None)
+    if v is not None and v != "":
+        return v
+    ev = os.getenv(env_name)
+    if ev is not None and ev != "":
+        return ev
+    return default
+>>>>>>> c80bfdd (try complicated version)
 
-# ВАЖНО: максимальный бюджет размышлений. Можно переопределить через env SLOTH_THINKING_BUDGET
-THINKING_BUDGET_TOKENS = int(os.getenv("SLOTH_THINKING_BUDGET", "24576"))
+GOOGLE_API_KEY = _pick_cfg("google.api_key", "GOOGLE_API_KEY", "AIzaSyA9kQwlc_fWpgQ64qG6yDJkis7PsgxljCw")
+GOOGLE_CLOUD_PROJECT = _pick_cfg("google.cloud_project", "GOOGLE_CLOUD_PROJECT", "useful-gearbox-464618-v3")
+GOOGLE_CLOUD_LOCATION = _pick_cfg("google.cloud_location", "GOOGLE_CLOUD_LOCATION", "us-central1")
+MODEL_NAME = _pick_cfg("model.name", "SLOTH_MODEL_NAME", "gemini-2.5-pro")
+API_TIMEOUT_SECONDS = int(_pick_cfg("api.timeout_seconds", "SLOTH_API_TIMEOUT", "600"))
+
+# ВАЖНО: максимальный бюджет размышлений.
+THINKING_BUDGET_TOKENS = int(_pick_cfg("thinking.budget_tokens", "SLOTH_THINKING_BUDGET", "24576"))
 
 # Команды-исключения для bash
 ALLOWED_COMMANDS = (
     "rm", "mv", "touch", "mkdir", "npm", "npx", "yarn", "pnpm", "git", "echo", "./"
 )
 
-MODEL_PRICING = {
+def _normalize_pricing(pricing: Dict[str, Any]) -> Dict[str, Any]:
+    def to_num(x: Any) -> Any:
+        if isinstance(x, str) and x.lower() == "inf":
+            return float('inf')
+        return x
+    out: Dict[str, Any] = {}
+    for model, mp in (pricing or {}).items():
+        m_out: Dict[str, Any] = {}
+        for io_key in ("input", "output"):
+            tiers = ((mp or {}).get(io_key, {}) or {}).get("tiers", [])
+            norm_tiers = []
+            for tier in tiers:
+                if not isinstance(tier, dict):
+                    continue
+                up_to = to_num(tier.get("up_to"))
+                price = float(tier.get("price")) if tier.get("price") is not None else None
+                norm_tiers.append({"up_to": up_to, "price": price})
+            m_out[io_key] = {"tiers": norm_tiers}
+        out[model] = m_out
+    return out
+
+_DEFAULT_MODEL_PRICING = {
     "gemini-2.5-pro": {
         "input": {"tiers": [{"up_to": 200000, "price": 1.25}, {"up_to": float('inf'), "price": 2.50}]},
         "output": {"tiers": [{"up_to": 200000, "price": 10.00}, {"up_to": float('inf'), "price": 15.00}]}
@@ -78,15 +118,17 @@ MODEL_PRICING = {
     }
 }
 
+MODEL_PRICING = _normalize_pricing(sloth_config.get("model_pricing", _DEFAULT_MODEL_PRICING) or _DEFAULT_MODEL_PRICING)
+
 # --- Глобальные переменные состояния API ---
 model = None  # в режиме google-genai здесь будет client, в остальных — объект модели
 ACTIVE_API_SERVICE = "N/A"
 GOOGLE_AI_HAS_FAILED_THIS_SESSION = False
 
 # Базовая генерационная конфигурация — БЕЗ max_output_tokens!
-GENERATION_TEMPERATURE = float(os.getenv("SLOTH_TEMPERATURE", "1"))
-GENERATION_TOP_P = float(os.getenv("SLOTH_TOP_P", "1"))
-GENERATION_TOP_K = int(float(os.getenv("SLOTH_TOP_K", "1")))
+GENERATION_TEMPERATURE = float(_pick_cfg("generation.temperature", "SLOTH_TEMPERATURE", "1"))
+GENERATION_TOP_P = float(_pick_cfg("generation.top_p", "SLOTH_TOP_P", "1"))
+GENERATION_TOP_K = int(float(_pick_cfg("generation.top_k", "SLOTH_TOP_K", "1")))
 
 def _log_generation_params():
     print(
@@ -457,9 +499,10 @@ def get_review_prompt(context, goal, iteration_count, attempt_history, boundary=
 **ВАЖНО:** Предыдущий шаг выполнен. Код ниже — это **обновлённое состояние** проекта.
 
 **Твоя задача — ВЕРИФИКАЦИЯ:**
-1) Проанализируй текущий код с учётом истории.
-2) Если цель достигнута — напиши `ГОТОВО`.
-3) Иначе — дай следующий блок действий и `summary`.
+Проанализируй текущий код с учётом истории и исходной цели.
+Если код уже полностью реализует поставленную задачу и предыдущие действия были успешны, не нужно ничего перезаписывать. Сразу пиши `ГОТОВО` и `done_summary`.
+Если код ещё не доделан или есть ошибки, которые нужно исправить, — дай следующий блок действий (`write_file` или `bash`).
+Если ты считаешь, что код готов, но его нужно проверить — верни только `verify_run` и `summary`.
 
 --- КОНТЕКСТ ПРОЕКТА (ОБНОВЛЁННЫЙ) ---
 {context}

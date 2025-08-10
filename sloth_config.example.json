@@ -1,0 +1,44 @@
+{
+  "google": {
+    "api_key": "YOUR_GOOGLE_API_KEY_HERE",
+    "cloud_project": "your-gcp-project-id",
+    "cloud_location": "us-central1"
+  },
+  "model": {
+    "name": "gemini-2.5-pro"
+  },
+  "api": {
+    "timeout_seconds": 600
+  },
+  "thinking": {
+    "budget_tokens": 24576
+  },
+  "generation": {
+    "temperature": 1.0,
+    "top_p": 1.0,
+    "top_k": 1
+  },
+  "paths": {
+    "default_start_dir": "/Users/vladimirdoronin/VovkaNowEngineer"
+  },
+  "model_pricing": {
+    "gemini-2.5-pro": {
+      "input": {
+        "tiers": [
+          { "up_to": 200000, "price": 1.25 },
+          { "up_to": "inf", "price": 2.50 }
+        ]
+      },
+      "output": {
+        "tiers": [
+          { "up_to": 200000, "price": 10.00 },
+          { "up_to": "inf", "price": 15.00 }
+        ]
+      }
+    },
+    "gemini-1.5-pro-latest": {
+      "input": { "tiers": [ { "up_to": "inf", "price": 3.50 } ] },
+      "output": { "tiers": [ { "up_to": "inf", "price": 10.50 } ] }
+    }
+  }
+}

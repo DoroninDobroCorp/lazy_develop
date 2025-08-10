@@ -14,11 +14,15 @@ from colors import Colors, Symbols
 import sloth_core
 import sloth_runner
 import context_collector
+import config as sloth_config
 
 # --- КОНСТАНТЫ ИНТЕРФЕЙСА ---
 MAX_ITERATIONS = 20
 HISTORY_FILE_NAME = 'sloth_history.json'
 RUN_LOG_FILE_NAME = 'sloth_run.log'
+# Базовая стартовая папка выбора проекта (уменьшает количество кликов)
+# Может быть переопределена в конфиге: paths.default_start_dir
+DEFAULT_START_DIR = '/Users/vladimirdoronin/VovkaNowEngineer'
 
 def calculate_cost(model_name, input_tokens, output_tokens):
     pricing_info = sloth_core.MODEL_PRICING.get(model_name)
@@ -544,7 +548,10 @@ if __name__ == "__main__":
         else:
             print(f"{Colors.OKBLUE}Пожалуйста, выберите папку проекта в открывшемся окне...{Colors.ENDC}", flush=True)
             root = Tk(); root.withdraw()
-            target_project_path = filedialog.askdirectory(title="Выберите папку проекта для Sloth")
+            # Используем стартовую папку из конфига (fallback на DEFAULT_START_DIR), если не валидна — домашняя директория
+            _cfg_start = sloth_config.get("paths.default_start_dir", DEFAULT_START_DIR)
+            _start_dir = _cfg_start if os.path.isdir(_cfg_start) else os.path.expanduser("~")
+            target_project_path = filedialog.askdirectory(title="Выберите папку проекта для Sloth", initialdir=_start_dir)
             root.destroy()
         if not target_project_path:
             print(f"{Colors.BOLD}{Colors.FAIL}{Symbols.CROSS} Папка проекта не была выбрана.{Colors.ENDC}", flush=True)
