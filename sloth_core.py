@@ -53,7 +53,7 @@ except Exception:
     VertexThinkingConfig = None
 
 # --- НАСТРОЙКИ ЯДРА ---
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "AIzaSyA9kQwlc_fWpgQ64qG6yDJkis7PsgxljCw")
+GOOGLE_API_KEY = os.environ["GOOGLE_API_KEY"]
 GOOGLE_CLOUD_PROJECT = os.getenv("GOOGLE_CLOUD_PROJECT", "useful-gearbox-464618-v3")
 GOOGLE_CLOUD_LOCATION = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
 MODEL_NAME = os.getenv("SLOTH_MODEL_NAME", "gemini-2.5-pro")
