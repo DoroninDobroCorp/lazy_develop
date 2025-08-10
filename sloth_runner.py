@@ -6,6 +6,12 @@ import hashlib
 import os
 from colors import Colors
 
+# --- БЕЛЫЙ СПИСОК КОМАНД ---
+# Синхронизирован со списком в prompt (см. sloth_core.py)
+ALLOWED_COMMANDS = (
+    "rm", "mv", "touch", "mkdir", "npm", "npx", "yarn", "pnpm", "git", "echo", "./"
+)
+
 def get_file_hash(filepath):
     """Вычисляет SHA256 хэш файла."""
     if not os.path.exists(filepath) or os.path.isdir(filepath): return None
@@ -32,6 +38,17 @@ def execute_commands(commands_str):
     Возвращает кортеж: (success, failed_command, error_message)
     """
     print(f"{Colors.OKBLUE}  [Детали] Запуск выполнения блока команд...{Colors.ENDC}")
+
+    # --- ВАЛИДАЦИЯ БЕЗОПАСНОСТИ ---
+    commands_to_run = [cmd.strip() for cmd in commands_str.strip().split('\n') if cmd.strip()]
+    for command in commands_to_run:
+        if not any(command.startswith(allowed) for allowed in ALLOWED_COMMANDS):
+            error_msg = (
+                f"Опасная команда заблокирована: '{command}'. Разрешены только: "
+                + ", ".join(ALLOWED_COMMANDS)
+            )
+            print(f"{Colors.FAIL}❌ ЛОГ: {error_msg}{Colors.ENDC}")
+            return False, commands_str, error_msg
 
     # ИЗМЕНЕНО: Более надежный способ поиска путей, включая те, что в кавычках
     filepaths = re.findall(r'[\'"]?([a-zA-Z0-9_\-\.\/]+)[\'"]?', commands_str)

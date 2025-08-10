@@ -7,7 +7,12 @@ import json
 import platform
 import subprocess
 import argparse
-from tkinter import Tk, filedialog
+# --- ИЗМЕНЕННЫЙ БЛОК ИМПОРТА TKINTER ---
+try:
+    from tkinter import Tk, filedialog
+    TKINTER_AVAILABLE = True
+except ImportError:
+    TKINTER_AVAILABLE = False
 import uuid
 import shutil
 
@@ -203,23 +208,75 @@ def cost_report(cost_log, total_cost):
 
 def calculate_cost(model_name, input_tokens, output_tokens):
     """
-    Простейший расчёт стоимости на основе переменных окружения.
-    Используются ставки за 1000 токенов:
-      - SLOTH_COST_IN_RATE  (по умолчанию 0)
-      - SLOTH_COST_OUT_RATE (по умолчанию 0)
-    Если ставки не заданы, возвращает 0.0.
+    Расчёт стоимости запроса.
+
+    - Если заданы ENV-переменные, используется OVERRIDE со ставками за 1000 токенов:
+        SLOTH_COST_IN_RATE, SLOTH_COST_OUT_RATE.
+      Это поведение сохранено для обратной совместимости.
+    - Если ENV не заданы, используются тарифы из sloth_core.MODEL_PRICING,
+      где цены заданы за 1,000,000 токенов (как в публичном прайсинге Google Gemini).
     """
+    # 1) Пробуем ENV-override; если заданы оба — используем их напрямую
     try:
         in_rate = float(os.getenv("SLOTH_COST_IN_RATE", "0"))
         out_rate = float(os.getenv("SLOTH_COST_OUT_RATE", "0"))
     except Exception:
         in_rate, out_rate = 0.0, 0.0
+
     try:
         in_tokens = float(input_tokens or 0)
         out_tokens = float(output_tokens or 0)
     except Exception:
         in_tokens, out_tokens = 0.0, 0.0
-    return (in_tokens / 1000.0) * in_rate + (out_tokens / 1000.0) * out_rate
+
+    if in_rate > 0 or out_rate > 0:
+        # ENV-override трактуем КАК ставку за 1,000 токенов (исторически)
+        return (in_tokens / 1000.0) * in_rate + (out_tokens / 1000.0) * out_rate
+
+    # 2) Если ENV не задан — используем таблицу тарифов из sloth_core.MODEL_PRICING (по tiers)
+    pricing = getattr(sloth_core, "MODEL_PRICING", {}) or {}
+
+    def pick_model_key(name: str) -> str:
+        if name in pricing:
+            return name
+        # Поиск по префиксу/вхождению, чтобы покрыть вариации (например, gemini-2.5-pro-exp)
+        name_low = (name or "").lower()
+        for k in pricing.keys():
+            k_low = k.lower()
+            if name_low.startswith(k_low) or k_low in name_low:
+                return k
+        # Фолбэк — если задан дефолт в sloth_core
+        default_key = getattr(sloth_core, "MODEL_NAME", None)
+        if default_key and default_key in pricing:
+            return default_key
+        return ""
+
+    def pick_tier_price(tiers, tokens: float) -> float:
+        try:
+            # tiers: list of {up_to, price}; выбираем первый с up_to >= tokens
+            sorted_tiers = sorted((tiers or []), key=lambda t: float(t.get("up_to", float('inf'))))
+            for t in sorted_tiers:
+                up_to = t.get("up_to", float('inf'))
+                price = t.get("price", None)
+                if price is None:
+                    continue
+                if tokens <= float(up_to):
+                    return float(price)
+            # если ничего не подошло — последняя известная цена или 0
+            if sorted_tiers:
+                last_price = sorted_tiers[-1].get("price", 0.0)
+                return float(last_price or 0.0)
+        except Exception:
+            pass
+        return 0.0
+
+    mkey = pick_model_key(model_name)
+    mp = pricing.get(mkey, {})
+    in_price_per_1k = pick_tier_price(((mp.get("input") or {}).get("tiers") or []), in_tokens)
+    out_price_per_1k = pick_tier_price(((mp.get("output") or {}).get("tiers") or []), out_tokens)
+
+    # Цены из MODEL_PRICING считаем за 1,000,000 токенов (единица прайсинга от Google)
+    return (in_tokens / 1_000_000.0) * in_price_per_1k + (out_tokens / 1_000_000.0) * out_price_per_1k
 
 def main(is_fix_mode, is_fast_mode, history_file_path, run_log_file_path, plan_file_path, verify_timeout_seconds=15, log_trim_limit=20000):
     total_start_time = time.time()
@@ -511,15 +568,20 @@ if __name__ == "__main__":
         if args.here:
             target_project_path = os.getcwd()
         else:
-            print(f"{Colors.OKBLUE}Пожалуйста, выберите папку проекта в открывшемся окне...{Colors.ENDC}", flush=True)
-            root = Tk(); root.withdraw()
-            # Используем стартовую папку из конфига (fallback на DEFAULT_START_DIR), если не валидна — домашняя директория
             _cfg_start = sloth_config.get("paths.default_start_dir", DEFAULT_START_DIR)
             _start_dir = _cfg_start if os.path.isdir(_cfg_start) else os.path.expanduser("~")
-            target_project_path = filedialog.askdirectory(title="Выберите папку проекта для Sloth", initialdir=_start_dir)
-            root.destroy()
-        if not target_project_path:
-            print(f"{Colors.BOLD}{Colors.FAIL}{Symbols.CROSS} Папка проекта не была выбрана.{Colors.ENDC}", flush=True)
+            if TKINTER_AVAILABLE:
+                print(f"{Colors.OKBLUE}Пожалуйста, выберите папку проекта в открывшемся окне...{Colors.ENDC}", flush=True)
+                root = Tk(); root.withdraw()
+                target_project_path = filedialog.askdirectory(title="Выберите папку проекта для Sloth", initialdir=_start_dir)
+                root.destroy()
+            else:
+                print(f"{Colors.WARNING}⚠️  ПРЕДУПРЕЖДЕНИЕ: GUI не доступен. Используется консольный ввод.{Colors.ENDC}", flush=True)
+                prompt = f"Пожалуйста, введите полный путь к папке проекта (или нажмите Enter для '{_start_dir}'): "
+                user_path = input(prompt).strip()
+                target_project_path = user_path or _start_dir
+        if not target_project_path or not os.path.isdir(target_project_path):
+            print(f"{Colors.BOLD}{Colors.FAIL}{Symbols.CROSS} Папка проекта не была выбрана или не существует.{Colors.ENDC}", flush=True)
             sys.exit(1)
         if os.path.exists(history_file_path):
             os.remove(history_file_path)
