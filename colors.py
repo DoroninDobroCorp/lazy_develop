@@ -215,3 +215,6 @@ class Symbols:
         WARNING = "[!]"
         FLAG = "[end]"
         SPINNER = "[~]"
+
+# test
+
