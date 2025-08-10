@@ -55,13 +55,6 @@ except Exception:
     VertexThinkingConfig = None
 
 # --- НАСТРОЙКИ ЯДРА ---
-<<<<<<< HEAD
-GOOGLE_API_KEY = os.environ["GOOGLE_API_KEY"]
-GOOGLE_CLOUD_PROJECT = os.getenv("GOOGLE_CLOUD_PROJECT", "useful-gearbox-464618-v3")
-GOOGLE_CLOUD_LOCATION = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
-MODEL_NAME = os.getenv("SLOTH_MODEL_NAME", "gemini-2.5-pro")
-API_TIMEOUT_SECONDS = int(os.getenv("SLOTH_API_TIMEOUT", "600"))
-=======
 def _pick_cfg(path: str, env_name: str, default: Any) -> Any:
     v = sloth_config.get(path, None)
     if v is not None and v != "":
@@ -70,7 +63,6 @@ def _pick_cfg(path: str, env_name: str, default: Any) -> Any:
     if ev is not None and ev != "":
         return ev
     return default
->>>>>>> c80bfdd (try complicated version)
 
 GOOGLE_API_KEY = _pick_cfg("google.api_key", "GOOGLE_API_KEY", "AIzaSyA9kQwlc_fWpgQ64qG6yDJkis7PsgxljCw")
 GOOGLE_CLOUD_PROJECT = _pick_cfg("google.cloud_project", "GOOGLE_CLOUD_PROJECT", "useful-gearbox-464618-v3")

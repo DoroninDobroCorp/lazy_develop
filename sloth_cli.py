@@ -315,6 +315,14 @@ def main(is_fix_mode, is_fast_mode, history_file_path, run_log_file_path, verify
             print(f"\n{Colors.BOLD}{Colors.HEADER}{Symbols.ROCKET} --- ЭТАП: ИСПОЛНЕНИЕ | ИТЕРАЦИЯ {iteration_count}/{MAX_ITERATIONS} ---{Colors.ENDC}", flush=True)
         
         _log_run(run_log_file_path, f"ЗАПРОС (Состояние: {state}, Итерация: {log_iter})", current_prompt)
+        # Явные логи перед отправкой запроса к модели, чтобы было видно прогресс
+        if state == "EXECUTION":
+            try:
+                service_name = str(active_service)
+            except Exception:
+                service_name = "AI Service"
+            print(f"{Colors.OKBLUE}🧠 ЛОГ: [Итерация {log_iter}] Готовлю запрос в модель ({service_name}).{Colors.ENDC}", flush=True)
+            print(f"{Colors.OKBLUE}⏳ ЛОГ: Отправляю запрос... (таймаут: 600 сек){Colors.ENDC}", flush=True)
         print(f"{Colors.CYAN}{Symbols.SPINNER} Думаю...{Colors.ENDC}", end='\r', flush=True)
         start_model_time = time.time()
         answer_data = sloth_core.send_request_to_model(model_instance, active_service, current_prompt, log_iter)
@@ -375,24 +383,16 @@ def main(is_fix_mode, is_fast_mode, history_file_path, run_log_file_path, verify
                 continue
 
         elif state == "EXECUTION":
-            if extract_block("done_summary", answer_text) or answer_text.strip().upper().startswith("ГОТОВО"):
-                # ИСПРАВЛЕНО: Убираем строгую проверку. Если AI прислал done_summary, считаем задачу выполненной.
-                # Это предотвращает бесконечный цикл, когда AI уверен в решении после этапа обзора.
-                done_summary = extract_block("done_summary", answer_text) or "Задача выполнена."
-                final_message = f"{Colors.OKGREEN}{Symbols.CHECK} Задача выполнена успешно! (за {iteration_count} итераций){Colors.ENDC}"
-                update_history_with_attempt(history_file_path, user_goal, done_summary)
-                print(f"{Colors.OKGREEN}📄 ИТОГОВОЕ РЕЗЮМЕ:\n{Colors.CYAN}{done_summary}{Colors.ENDC}", flush=True)
-                manual_steps = extract_block("manual", answer_text)
-                if manual_steps:
-                    final_message += f"\n\n{Colors.WARNING}✋ ТРЕБУЮТСЯ РУЧНЫЕ ДЕЙСТВИЯ:{Colors.ENDC}\n{manual_steps}"
-                break
-            
-            # --- ОБРАБОТКА ДЕЙСТВИЙ: write_file (мульти-блоки) или bash ---
+            # --- СНАЧАЛА ОБРАБАТЫВАЕМ ДЕЙСТВИЯ: write_file или bash ---
             commands_to_run = extract_block("bash", answer_text)
             write_blocks = list(_iter_write_file_blocks(answer_text, boundary_token=BOUNDARY_TOKEN))
             strategy_description = extract_block("summary", answer_text) or "Стратегия не описана"
             verify_run_present = (extract_block("verify_run", answer_text) is not None)
             
+            # Извлекаем done_summary заранее, но используем позже
+            done_summary_text = extract_block("done_summary", answer_text)
+            is_done = done_summary_text is not None or answer_text.strip().upper().startswith("ГОТОВО")
+
             action_taken, success, failed_command, error_message = False, False, "N/A", ""
 
             if write_blocks:
@@ -404,11 +404,9 @@ def main(is_fix_mode, is_fast_mode, history_file_path, run_log_file_path, verify
                         dir_name = os.path.dirname(filepath)
                         if dir_name:
                             os.makedirs(dir_name, exist_ok=True)
-                        # Пишем БЕЗ strip(), С РОВНО ТЕМ СОДЕРЖИМЫМ, ЧТО ПРИШЛО
-                        # Жёсткий сэндбокс: запись только внутри корня проекта
                         abs_path = os.path.realpath(filepath)
                         root_abs = os.path.realpath(os.getcwd())
-                        if not abs_path.startswith(root_abs + os.sep):
+                        if not abs_path.startswith(root_abs + os.sep) and not abs_path == root_abs:  # Разрешаем запись в корень
                             raise RuntimeError(f"Запрещён путь вне корня проекта: {filepath}")
                         with open(filepath, "w", encoding="utf-8", newline="") as f:
                             f.write(content)
@@ -419,7 +417,7 @@ def main(is_fix_mode, is_fast_mode, history_file_path, run_log_file_path, verify
                         success = False
                         failed_command = f"write_file {raw_filepath}"
                         error_message = str(e)
-                        break  # прекращаем последовательность, чтобы вернуть ошибку корректно
+                        break
 
             elif commands_to_run:
                 action_taken = True
@@ -430,15 +428,34 @@ def main(is_fix_mode, is_fast_mode, history_file_path, run_log_file_path, verify
                 timings['commands'] += cmd_duration
                 print(f"{Colors.GREY}ℹ️  Команды выполнены за {cmd_duration:.2f} сек.{Colors.ENDC}", flush=True)
 
-            if not action_taken:
-                print(f"{Colors.FAIL}❌ ЛОГ: Модель не вернула команд. Пробую на следующей итерации.{Colors.ENDC}", flush=True)
+            # --- ТЕПЕРЬ ПРОВЕРЯЕМ, ЗАВЕРШЕНА ЛИ ЗАДАЧА ---
+            # Если было совершено действие И модель сказала, что это конец, то выходим.
+            if action_taken and is_done:
+                final_message = f"{Colors.OKGREEN}{Symbols.CHECK} Задача выполнена успешно! (за {iteration_count} итераций){Colors.ENDC}"
+                update_history_with_attempt(history_file_path, user_goal, done_summary_text or "Задача выполнена.")
+                print(f"{Colors.OKGREEN}📄 ИТОГОВОЕ РЕЗЮМЕ:\n{Colors.CYAN}{done_summary_text or 'Нет резюме.'}{Colors.ENDC}", flush=True)
+                manual_steps = extract_block("manual", answer_text)
+                if manual_steps:
+                    final_message += f"\n\n{Colors.WARNING}✋ ТРЕБУЮТСЯ РУЧНЫЕ ДЕЙСТВИЯ:{Colors.ENDC}\n{manual_steps}"
+                break
+            
+            # Если действий не было, НО модель сказала "ГОТОВО", тоже выходим.
+            if not action_taken and is_done:
+                final_message = f"{Colors.OKGREEN}{Symbols.CHECK} Задача отмечена как выполненная моделью без совершения действий. (за {iteration_count} итераций){Colors.ENDC}"
+                update_history_with_attempt(history_file_path, user_goal, done_summary_text or "Задача выполнена.")
+                break
+
+            # Если действий не было и задача не завершена - это ошибка логики модели
+            if not action_taken and not is_done:
+                print(f"{Colors.FAIL}❌ ЛОГ: Модель не вернула ни команд, ни сигнала о завершении. Пробую на следующей итерации.{Colors.ENDC}", flush=True)
                 project_context, duration = get_project_context(is_fast_mode, files_to_include_fully)
                 timings['context'] += duration
                 current_prompt = sloth_core.get_review_prompt(project_context, user_goal, iteration_count + 1, attempt_history, boundary=BOUNDARY_TOKEN)
                 current_prompt_type = "review"
                 iteration_count += 1
                 continue
-            
+
+            # (Остальная часть логики обработки success/failure и подготовки следующего промпта остается здесь)
             project_context, duration = get_project_context(is_fast_mode, files_to_include_fully)
             timings['context'] += duration
             if not project_context:
