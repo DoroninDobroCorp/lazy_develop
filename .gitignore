@@ -1,0 +1,22 @@
+# deps & build
+node_modules/
+dist/
+build/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.eggs/
+.mypy_cache/
+.pytest_cache/
+.coverage
+.cache/
+# env
+.env
+.env.*
+# keep example
+!.env.example
+# logs & misc
+*.log
+.DS_Store

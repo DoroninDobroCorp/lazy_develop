@@ -1,0 +1,14 @@
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+lint.select = ["E","F","I","B","UP"]
+lint.ignore = ["E501"]
+format.quote-style = "double"
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
