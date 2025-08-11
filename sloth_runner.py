@@ -35,7 +35,7 @@ def _adapt_commands_for_project_root(s: str) -> str:
 def execute_commands(commands_str):
     """
     Выполняет блок shell-команд.
-    Возвращает кортеж: (success, failed_command, error_message)
+    Возвращает кортеж: (success, failed_command, error_message, changed_files, created_paths)
     """
     print(f"{Colors.OKBLUE}  [Детали] Запуск выполнения блока команд...{Colors.ENDC}")
 
@@ -72,7 +72,7 @@ def execute_commands(commands_str):
         if result.returncode != 0:
             error_msg = f"Команда завершилась с ненулевым кодом выхода ({result.returncode}).\nОшибка (STDERR): {result.stderr.strip()}"
             print(f"{Colors.FAIL}❌ ЛОГ: КРИТИЧЕСКАЯ ОШИБКА при выполнении блока команд.\n{error_msg}{Colors.ENDC}")
-            return False, commands_str, result.stderr.strip() or "Команда провалилась без вывода в stderr."
+            return False, commands_str, result.stderr.strip() or "Команда провалилась без вывода в stderr.", set(), set()
 
         if result.stderr:
             print(f"{Colors.WARNING}⚠️  ПРЕДУПРЕЖДЕНИЕ (STDERR от успешной команды):\n{result.stderr.strip()}{Colors.ENDC}")
@@ -89,6 +89,7 @@ def execute_commands(commands_str):
         modified_files = any(hashes_before.get(fp) != hashes_after.get(fp) for fp in hashes_before)
         # Проверяем, появились ли новые файлы или папки
         created_paths = files_after - files_before
+        changed_files = {fp for fp in hashes_before.keys() if hashes_before.get(fp) != hashes_after.get(fp)}
         
         if not modified_files and not created_paths:
             # Если ничего не изменилось и не создалось - это ошибка логики
@@ -98,7 +99,7 @@ def execute_commands(commands_str):
             print(f"{Colors.FAIL}❌ ЛОГ: ОШИБКА ЛОГИКИ: {error_msg}{Colors.ENDC}")
             if result.stderr:
                 print(f"Причина из STDERR: {final_error_message}")
-            return False, commands_str, final_error_message
+            return False, commands_str, final_error_message, set(), set()
 
         # Если были изменения или создания, все хорошо
         if modified_files:
@@ -106,8 +107,8 @@ def execute_commands(commands_str):
         if created_paths:
             print(f"{Colors.OKGREEN}✅ ЛОГ: Блок команд успешно выполнен. Были созданы новые пути: {', '.join(created_paths)}{Colors.ENDC}")
             
-        return True, None, None
+        return True, None, None, changed_files, created_paths
 
     except Exception as e:
         print(f"{Colors.FAIL}❌ ЛОГ: Непредвиденная ОШИБКА в исполнителе: {e}{Colors.ENDC}")
-        return False, commands_str, str(e)
+        return False, commands_str, str(e), set(), set()

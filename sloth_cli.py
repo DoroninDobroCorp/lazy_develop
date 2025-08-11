@@ -324,6 +324,10 @@ def main(is_fix_mode, is_fast_mode, history_file_path, run_log_file_path, plan_f
     except Exception as e:
         print(f"{Colors.WARNING}{Symbols.WARNING}  ПРЕДУПРЕЖДЕНИЕ: Не удалось обработать verify_command: {e}{Colors.ENDC}", flush=True)
 
+    # Детектор повторяющихся правок тех же файлов
+    prev_changed_files = None
+    repeat_same_files_count = 0
+
     while iteration_count <= MAX_ITERATIONS and state != "DONE":
         model_instance, active_service = sloth_core.get_active_service_details()
 
@@ -424,6 +428,8 @@ def main(is_fix_mode, is_fast_mode, history_file_path, run_log_file_path, plan_f
             is_done = done_summary_block is not None
 
             action_taken, success = False, False
+            iteration_changed_files = set()
+            iteration_created_paths = set()
 
             if write_file_blocks:
                 action_taken = True
@@ -440,12 +446,16 @@ def main(is_fix_mode, is_fast_mode, history_file_path, run_log_file_path, plan_f
                         # --- КОНЕЦ ПРОВЕРКИ ---
                         
                         print(f"\n{Colors.OKBLUE}📝 Перезаписываю файл: {relative_path_for_display}{Colors.ENDC}", flush=True)
+                        existed_before = os.path.exists(safe_filepath)
                         os.makedirs(os.path.dirname(safe_filepath), exist_ok=True)
                         with open(safe_filepath, "w", encoding="utf-8", newline="") as f:
                             f.write(block['content'])
-                        
+
                         print(f"{Colors.OKGREEN}✅ Файл успешно перезаписан: {relative_path_for_display}{Colors.ENDC}", flush=True)
                         success = True
+                        iteration_changed_files.add(relative_path_for_display)
+                        if not existed_before:
+                            iteration_created_paths.add(relative_path_for_display)
                     except ValueError as e:
                         print(f"{Colors.FAIL}❌ ОШИБКА ВАЛИДАЦИИ: {e}{Colors.ENDC}", flush=True)
                         success, failed_command, error_message = False, f"write_file ({block['header']})", str(e)
@@ -459,11 +469,52 @@ def main(is_fix_mode, is_fast_mode, history_file_path, run_log_file_path, plan_f
                 action_taken = True
                 print(f"\n{Colors.OKBLUE}🔧 Выполняю shell-команды...{Colors.ENDC}", flush=True)
                 start_cmd_time = time.time()
-                success, failed_command, error_message = sloth_runner.execute_commands(commands_to_run_block['content'])
+                success, failed_command, error_message, changed_files, created_paths = sloth_runner.execute_commands(commands_to_run_block['content'])
+                iteration_changed_files |= set(changed_files or set())
+                iteration_created_paths |= set(created_paths or set())
                 timings['commands'] += time.time() - start_cmd_time
 
             # --- Логика определения следующего состояния (остаётся в основном без изменений) ---
             history_entry = f"**Итерация {iteration_count} ({state}):**\n**Стратегия:** {strategy_description}\n"
+            if iteration_changed_files or iteration_created_paths:
+                changed_list = ", ".join(sorted(iteration_changed_files)) or "—"
+                created_list = ", ".join(sorted(iteration_created_paths)) or "—"
+                history_entry += f"**Изменены файлы:** {changed_list}\n**Созданы пути:** {created_list}\n"
+
+            # Простая аннотация повторяющихся правок тех же файлов
+            if prev_changed_files is not None and iteration_changed_files == prev_changed_files and iteration_changed_files:
+                repeat_same_files_count += 1
+            else:
+                repeat_same_files_count = 0
+            prev_changed_files = set(iteration_changed_files)
+            if repeat_same_files_count >= 1 and iteration_changed_files:
+                history_entry += f"**Замечание:** Повтор правок одних и тех же файлов уже {repeat_same_files_count + 1} итерации подряд. Избегай микро‑изменений, консолидируй правки и, если цель достигнута, возвращай `ГОТОВО`.\n"
+
+            # Если те же файлы меняются уже в третий раз подряд — форсируем верификацию и анализ логов
+            if repeat_same_files_count >= 2 and iteration_changed_files:
+                print(f"{Colors.WARNING}{Symbols.WARNING}  Обнаружен повтор правок одних и тех же файлов (>=3 подряд). Форсирую верификацию и анализ логов.{Colors.ENDC}", flush=True)
+                if verify_command is not None:
+                    print(f"{Colors.OKBLUE}🧪 (FORCED) Запускаю верификацию: {verify_command}{Colors.ENDC}", flush=True)
+                    start_verify_time = time.time()
+                    try:
+                        proc = subprocess.Popen(verify_command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8')
+                        stdout, stderr = proc.communicate(timeout=verify_timeout_seconds)
+                        rc = proc.returncode
+                    except subprocess.TimeoutExpired:
+                        proc.kill(); stdout, stderr = proc.communicate(); rc = 124
+                    except Exception as e:
+                        stdout, stderr, rc = "", f"Ошибка запуска verify_command: {e}", -1
+                    timings['verify'] += time.time() - start_verify_time
+                    def _trim(s, lim=log_trim_limit): return (s[:lim] + "\n...[TRIMMED]...") if len(s) > lim else s
+                    logs_collected = f"$ {verify_command}\n(exit={rc})\n\n[STDOUT]\n{_trim(stdout)}\n\n[STDERR]\n{_trim(stderr)}"
+                    _log_run(run_log_file_path, "ЛОГИ ВЕРИФИКАЦИИ (FORCED)", logs_collected)
+                else:
+                    logs_collected = "(Верификация не настроена) Автоматический переход в анализ логов из-за повторяющихся правок тех же файлов."
+                    _log_run(run_log_file_path, "ЛОГИ ВЕРИФИКАЦИИ (FORCED-NONE)", logs_collected)
+                state = "ANALYZING_LOGS"
+                attempt_history.append(history_entry)
+                iteration_count += 1
+                continue
 
             if is_done:
                 final_message = f"{Colors.OKGREEN}{Symbols.CHECK} Задача выполнена успешно! (за {iteration_count} итераций){Colors.ENDC}"
