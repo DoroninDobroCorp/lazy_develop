@@ -533,7 +533,15 @@ def main(is_fix_mode, is_fast_mode, history_file_path, run_log_file_path, plan_f
         start_model_time = time.time()
         
         # --- 2. SEND REQUEST TO MODEL ---
-        answer_data = sloth_core.send_request_to_model(model_instance, active_service, current_prompt, log_iter)
+        # Для стадии анализа логов используем более дешёвую быстромодель (Flash)
+        override_model = sloth_core.CONTEXT_PREP_MODEL_NAME if state == "ANALYZING_LOGS" else None
+        answer_data = sloth_core.send_request_to_model(
+            model_instance,
+            active_service,
+            current_prompt,
+            log_iter,
+            model_name_override=override_model,
+        )
         model_duration = time.time() - start_model_time
         timings['model'] += model_duration
 
@@ -572,6 +580,13 @@ def main(is_fix_mode, is_fast_mode, history_file_path, run_log_file_path, plan_f
                 print(f"{Colors.OKGREEN}✅ Задача понятна. План получен.{Colors.ENDC}\n{Colors.HEADER}План действий:{Colors.ENDC}\n{Colors.CYAN}{plan}{Colors.ENDC}", flush=True)
                 with open(plan_file_path, "w", encoding='utf-8') as f:
                     f.write(plan)
+                # Проверяем, что план имеет поитерационную структуру (содержит "Итерация")
+                if not re.search(r"Итерац", plan, re.IGNORECASE):
+                    print(f"{Colors.WARNING}⚠️ План не в поитерационном формате. Запрашиваю у модели формат с явными шагами: 'Итерация 1/N', цели, файлы, объём, зависимости, проверка (verify_run), DoD.{Colors.ENDC}", flush=True)
+                    # Добавим мягкое уточнение к исходной задаче, чтобы модель переформатировала
+                    initial_task += "\n\n[СИСТЕМА]: Пожалуйста, верни план строго в поитерационном формате с явными блоками 'Итерация i/N' и финальным verify_run при наличии команды."
+                    state = "PLANNING"
+                    continue
                 # ВНИМАНИЕ: файлы для полного включения берём ИСКЛЮЧИТЕЛЬНО из CONTEXT_PREP
                 state = "INITIAL_CODING"
             else:
@@ -584,6 +599,7 @@ def main(is_fix_mode, is_fast_mode, history_file_path, run_log_file_path, plan_f
             strategy_description = next((b['content'] for b in all_blocks if b['type'] == 'summary'), "Стратегия не описана")
             commands_to_run_block = next((b for b in all_blocks if b['type'] == 'bash'), None)
             write_file_blocks = [b for b in all_blocks if b['type'] == 'write_file']
+            manual_block = next((b for b in all_blocks if b['type'] == 'manual'), None)
             verify_run_present = any(b['type'] == 'verify_run' for b in all_blocks)
             done_summary_block = next((b for b in all_blocks if b['type'] == 'done_summary'), None)
             is_done = done_summary_block is not None
@@ -635,6 +651,28 @@ def main(is_fix_mode, is_fast_mode, history_file_path, run_log_file_path, plan_f
                 iteration_created_paths |= set(created_paths or set())
                 timings['commands'] += time.time() - start_cmd_time
 
+            # --- Если модель попросила ручные действия, обрабатываем их НЕМЕДЛЕННО ---
+            if manual_block and not is_done:
+                action_taken = True
+                print(f"\n{Colors.WARNING}✋ ТРЕБУЮТСЯ РУЧНЫЕ ДЕЙСТВИЯ:{Colors.ENDC}\n{manual_block['content']}", flush=True)
+                user_feedback = _read_multiline_input(
+                    f"{Colors.OKBLUE}Когда закончите, нажмите Enter 3 раза. Если есть логи/ошибки — вставьте их ниже и тоже завершите Enter 3 раза.{Colors.ENDC}"
+                )
+                if user_feedback:
+                    logs_collected = f"[MANUAL ACTION LOGS]\n{user_feedback}"
+                    _log_run(run_log_file_path, "ЛОГИ ОТ ПОЛЬЗОВАТЕЛЯ (MANUAL)", logs_collected)
+                    history_entry = f"**Итерация {iteration_count} ({state}):**\n**Стратегия:** {strategy_description}\n" \
+                                    f"**Ручные действия запрошены.** Пользователь предоставил логи."
+                    attempt_history.append(history_entry)
+                    state = "ANALYZING_LOGS"
+                else:
+                    history_entry = f"**Итерация {iteration_count} ({state}):**\n**Стратегия:** {strategy_description}\n" \
+                                    f"**Ручные действия запрошены.** Пользователь подтвердил выполнение без логов."
+                    attempt_history.append(history_entry)
+                    state = "REVIEWING"
+                iteration_count += 1
+                continue
+
             # --- Логика определения следующего состояния (остаётся в основном без изменений) ---
             history_entry = f"**Итерация {iteration_count} ({state}):**\n**Стратегия:** {strategy_description}\n"
             if iteration_changed_files or iteration_created_paths:
@@ -681,6 +719,31 @@ def main(is_fix_mode, is_fast_mode, history_file_path, run_log_file_path, plan_f
                 continue
 
             if is_done:
+                # Если есть verify-команда — сначала проверяем запуском, даже если модель не выдала verify_run
+                if verify_command is not None and verify_command != "":
+                    # Скан на служебные маркеры перед запуском
+                    findings = _scan_project_for_token(os.getcwd(), "SLOTH_BOUNDARY")
+                    if findings:
+                        msg = "Обнаружены служебные маркеры SLOTH_BOUNDARY в коде. Требуется чистка.\n" + "\n".join(findings[:20])
+                        _log_run(run_log_file_path, "SLOTH_BOUNDARY FINDINGS (DONE-PATH)", msg)
+                        failed_command, error_message = "boundary scan (done)", msg
+                        state = "FIXING_ERROR"
+                        attempt_history.append(history_entry + f"**Результат:** ПРОВАЛ\n**Ошибка:** {error_message}")
+                        iteration_count += 1
+                        continue
+                    print(f"{Colors.OKBLUE}🧪 (AUTO) Финальная верификация перед ГОТОВО: {verify_command}{Colors.ENDC}", flush=True)
+                    start_verify_time = time.time()
+                    rc, stdout, stderr = _execute_verify_with_timeout(verify_command, verify_timeout_seconds)
+                    timings['verify'] += time.time() - start_verify_time
+                    def _trim(s, lim=log_trim_limit): return (s[:lim] + "\n...[TRIMMED]...") if len(s) > lim else s
+                    logs_collected = f"$ {verify_command}\n(exit={rc})\n\n[STDOUT]\n{_trim(stdout)}\n\n[STDERR]\n{_trim(stderr)}"
+                    _log_run(run_log_file_path, "ЛОГИ ВЕРИФИКАЦИИ (AUTO-DONE)", logs_collected)
+                    # Переходим в анализ логов для принятия окончательного решения
+                    state = "ANALYZING_LOGS"
+                    attempt_history.append(history_entry)
+                    iteration_count += 1
+                    continue
+                # Если verify не задан — завершаем сразу
                 final_message = f"{Colors.OKGREEN}{Symbols.CHECK} Задача выполнена успешно! (за {iteration_count} итераций){Colors.ENDC}"
                 done_summary_text = done_summary_block['content'] if done_summary_block else "Задача выполнена."
                 update_history_with_attempt(history_file_path, user_goal, done_summary_text)
@@ -719,7 +782,23 @@ def main(is_fix_mode, is_fast_mode, history_file_path, run_log_file_path, plan_f
                     state = "REVIEWING"
             else: # failure
                 history_entry += f"**Результат:** ПРОВАЛ\n**Ошибка:** {error_message}"
-                state = "FIXING_ERROR"
+                # Если ошибка указывает на заблокированную/опасную команду или запрос пароля — переводим в ручной режим
+                err_low = (error_message or "").lower()
+                if ("опасная команда заблокирована" in (error_message or "")) or ("permission denied" in err_low) or ("password" in err_low) or ("sudo" in err_low):
+                    print(f"\n{Colors.WARNING}✋ Требуются действия пользователя (команда заблокирована/требуется пароль):{Colors.ENDC}\n"
+                          f"Команда: {failed_command}\n"
+                          f"Ошибка: {error_message}", flush=True)
+                    user_feedback = _read_multiline_input(
+                        f"{Colors.OKBLUE}Выполните необходимые действия вручную (например, установку зависимостей). Затем нажмите Enter 3 раза. Если есть логи/ошибки — вставьте их ниже.{Colors.ENDC}"
+                    )
+                    if user_feedback:
+                        logs_collected = f"[MANUAL ACTION LOGS]\n{user_feedback}"
+                        _log_run(run_log_file_path, "ЛОГИ ОТ ПОЛЬЗОВАТЕЛЯ (MANUAL AFTER FAIL)", logs_collected)
+                        state = "ANALYZING_LOGS"
+                    else:
+                        state = "REVIEWING"
+                else:
+                    state = "FIXING_ERROR"
 
             attempt_history.append(history_entry)
             iteration_count += 1

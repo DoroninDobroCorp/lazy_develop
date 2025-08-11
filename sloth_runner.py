@@ -9,7 +9,9 @@ from colors import Colors
 # --- БЕЛЫЙ СПИСОК КОМАНД ---
 # Синхронизирован со списком в prompt (см. sloth_core.py)
 ALLOWED_COMMANDS = (
-    "rm", "mv", "touch", "mkdir", "npm", "npx", "yarn", "pnpm", "git", "echo", "./"
+    "rm", "mv", "touch", "mkdir", "npm", "npx", "yarn", "pnpm", "git", "echo", "./",
+    # Расширение для миграций и современных менеджеров
+    "prisma", "bunx", "bun"
 )
 
 def get_file_hash(filepath):
@@ -41,14 +43,40 @@ def execute_commands(commands_str):
 
     # --- ВАЛИДАЦИЯ БЕЗОПАСНОСТИ ---
     commands_to_run = [cmd.strip() for cmd in commands_str.strip().split('\n') if cmd.strip()]
+    # Разрешаем также безопасный паттерн: `cd <подпапка> && <разрешённая команда>`
+    allowed_prefixes = ALLOWED_COMMANDS
+    allowed_regex = re.compile(r'^cd\s+([A-Za-z0-9_\-\./]+)\s*&&\s*(' + '|'.join(map(re.escape, allowed_prefixes)) + r')\b')
+
+    def _is_safe_cd_and_run(cmd: str) -> bool:
+        m = allowed_regex.match(cmd)
+        if not m:
+            return False
+        subdir = m.group(1)
+        # Без абсолютных путей, без обратных слэшей и без переходов наверх
+        if subdir.startswith('/') or '\\' in subdir:
+            return False
+        # Нормализуем и проверяем на '..'
+        parts = [p for p in subdir.split('/') if p not in ('', '.')]
+        if any(p == '..' for p in parts):
+            return False
+        return True
+
+    def _is_allowed(cmd: str) -> bool:
+        if any(cmd.startswith(p) for p in allowed_prefixes):
+            return True
+        if _is_safe_cd_and_run(cmd):
+            return True
+        return False
+
     for command in commands_to_run:
-        if not any(command.startswith(allowed) for allowed in ALLOWED_COMMANDS):
+        if not _is_allowed(command):
             error_msg = (
                 f"Опасная команда заблокирована: '{command}'. Разрешены только: "
                 + ", ".join(ALLOWED_COMMANDS)
+                + " и паттерн 'cd <subdir> && <разрешённая команда>'"
             )
             print(f"{Colors.FAIL}❌ ЛОГ: {error_msg}{Colors.ENDC}")
-            return False, commands_str, error_msg
+            return False, commands_str, error_msg, set(), set()
 
     # ИЗМЕНЕНО: Более надежный способ поиска путей, включая те, что в кавычках
     filepaths = re.findall(r'[\'"]?([a-zA-Z0-9_\-\.\/]+)[\'"]?', commands_str)
