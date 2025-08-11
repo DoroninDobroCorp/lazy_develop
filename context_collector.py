@@ -196,3 +196,115 @@ def gather_project_context(root_dir, mode='full', full_content_files=None, top_n
         else:
             all_lines.append(_summarize_content(content, path))
     return "\n".join(all_lines)
+
+
+# --- НОВОЕ: Пакетная подготовка контекста для жадного выбора файлов ---
+def _estimate_tokens(text: str) -> int:
+    """Грубая оценка числа токенов (≈ 4 символа на токен)."""
+    if not text:
+        return 0
+    return max(1, int(len(text) / 4))
+
+def gather_project_context_batches(root_dir: str, approx_tokens_per_batch: int = 200000):
+    """
+    Собирает контекст проекта пакетами на границах файлов, чтобы каждый пакет
+    содержал не более ~approx_tokens_per_batch токенов (грубая оценка).
+
+    Возвращает список строк; каждый элемент — самостоятельный кусок контекста,
+    включающий небольшое дерево и полные содержимые файлов этого пакета.
+    Бинарные/игнорируемые файлы пропускаются так же, как в gather_project_context().
+    """
+    root_dir = os.path.abspath(root_dir)
+    file_entries = []  # [(abs_path, rel_path, content, size_chars)]
+    for dirpath, dirnames, filenames in os.walk(root_dir):
+        # Фильтруем директории in-place
+        dirnames[:] = [d for d in dirnames
+                        if not _is_virtual_env(os.path.join(dirpath, d))
+                        and d not in IGNORE_DIRS]
+        for filename in filenames:
+            filepath = os.path.join(dirpath, filename)
+            if _should_ignore(filepath, root_dir):
+                continue
+            try:
+                # Молча пропускаем бинарные
+                if _is_binary_file(filepath):
+                    continue
+                # Ограничения по размеру
+                file_size = os.path.getsize(filepath)
+                if file_size > MAX_FILE_SIZE_CHARS:
+                    # Слишком большие текстовые — пропускаем (как и прежде)
+                    print(f"{Colors.WARNING}ЛОГ: Пропускаю слишком большой ТЕКСТОВЫЙ файл ({file_size} байт): {os.path.relpath(filepath, root_dir)}{Colors.ENDC}")
+                    continue
+            except OSError:
+                continue
+
+            content = _get_file_content(filepath)
+            if content is None:
+                continue
+            rel_path = os.path.relpath(filepath, root_dir)
+            file_entries.append((filepath, rel_path, content, len(content)))
+
+    # Стабильный порядок: по относительному пути
+    file_entries.sort(key=lambda x: x[1])
+
+    batches = []
+    current_batch_files = []  # [(rel_path, content, size_chars)]
+    current_tokens = 0
+
+    for _, rel_path, content, _size in file_entries:
+        file_tokens = _estimate_tokens(content)
+        # Если файл сам по себе больше лимита — положим отдельным пакетом
+        if file_tokens > approx_tokens_per_batch:
+            if current_batch_files:
+                batches.append(current_batch_files)
+                current_batch_files = []
+                current_tokens = 0
+            batches.append([(rel_path, content, len(content))])
+            continue
+        if current_tokens + file_tokens > approx_tokens_per_batch and current_batch_files:
+            batches.append(current_batch_files)
+            current_batch_files = []
+            current_tokens = 0
+        current_batch_files.append((rel_path, content, len(content)))
+        current_tokens += file_tokens
+
+    if current_batch_files:
+        batches.append(current_batch_files)
+
+    # Сформируем для каждой пачки компактное дерево + контент
+    batch_strings = []
+    for batch in batches:
+        # Собираем дерево
+        tree = {}
+        sizes = {}
+        for rel_path, content, size_chars in batch:
+            sizes[rel_path] = size_chars
+            parts = rel_path.split(os.sep)
+            node = tree
+            for part in parts[:-1]:
+                node = node.setdefault(part, {})
+            node[parts[-1]] = rel_path
+
+        def generate_tree_lines_recursive(subtree, prefix=""):
+            lines = []
+            entries = sorted(subtree.items(), key=lambda item: isinstance(item[1], dict), reverse=True)
+            for i, (name, value) in enumerate(entries):
+                connector = "└── " if i == len(entries) - 1 else "├── "
+                if isinstance(value, dict):
+                    lines.append(f"{prefix}{connector}{name}/")
+                    lines.extend(generate_tree_lines_recursive(value, prefix + ("    " if i == len(entries) - 1 else "│   ")))
+                else:
+                    lines.append(f"{prefix}{connector}{name} ({sizes.get(value, 0)} chars)")
+            return lines
+
+        tree_str = os.path.basename(root_dir) + "/\n" + "\n".join(generate_tree_lines_recursive(tree))
+        lines = []
+        lines.append("Сейчас я выгружу КУСОК контекста проекта: сначала дерево файлов, затем содержимое этих файлов.")
+        lines.append("\n--- Структура пакета ---\n" + tree_str)
+        lines.append("\n--- Содержимое файлов пакета ---")
+        for rel_path, content, _ in batch:
+            lines.append(f"\nФайл: {rel_path}\n{'-' * (6 + len(rel_path))}")
+            lines.append(content)
+        batch_strings.append("\n".join(lines))
+
+    return batch_strings

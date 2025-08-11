@@ -289,7 +289,8 @@ def main(is_fix_mode, is_fast_mode, history_file_path, run_log_file_path, plan_f
     initial_task = user_goal + (f"\n\n--- ЛОГ ОШИБКИ ---\n{error_log}" if error_log else "")
     
     # --- State Machine Setup ---
-    state = "INITIAL_CODING" if is_fast_mode else "PLANNING"
+    # В интеллектуальном режиме добавляем стадию подготовки контекста перед планированием
+    state = "INITIAL_CODING" if is_fast_mode else "CONTEXT_PREP"
     if is_fix_mode:
         state = "INITIAL_CODING"
 
@@ -331,13 +332,79 @@ def main(is_fix_mode, is_fast_mode, history_file_path, run_log_file_path, plan_f
     while iteration_count <= MAX_ITERATIONS and state != "DONE":
         model_instance, active_service = sloth_core.get_active_service_details()
 
+        # --- Специальная стадия: ПОДГОТОВКА КОНТЕКСТА (жадный сбор файлов) ---
+        if state == "CONTEXT_PREP":
+            try:
+                print(f"\n{Colors.BOLD}{Colors.HEADER}--- ЭТАП: ПОДГОТОВКА КОНТЕКСТА ---{Colors.ENDC}", flush=True)
+                print(f"{Colors.CYAN}{Symbols.SPINNER} Готовлю большие батчи контекста...{Colors.ENDC}", end='\r', flush=True)
+                prep_start = time.time()
+                batches = context_collector.gather_project_context_batches(os.getcwd(), approx_tokens_per_batch=200000)
+                timings['context'] += (time.time() - prep_start)
+                print(f"{Colors.OKGREEN}{Symbols.CHECK} Подготовлено батчей: {len(batches)}{' '*10}{Colors.ENDC}", flush=True)
+
+                aggregated_files = set()
+                override_model = getattr(sloth_core, 'CONTEXT_PREP_MODEL_NAME', None) or "gemini-2.5-flash"
+                for bi, batch_text in enumerate(batches, start=1):
+                    prompt = sloth_core.get_context_prep_prompt(batch_text, initial_task, BOUNDARY_TOKEN)
+                    _log_run(run_log_file_path, f"ЗАПРОС (Состояние: CONTEXT_PREP, Батч: {bi})", prompt)
+                    print(f"{Colors.CYAN}{Symbols.SPINNER} Обрабатываю батч {bi}/{len(batches)}...{Colors.ENDC}", end='\r', flush=True)
+                    start_model_time = time.time()
+                    answer = sloth_core.send_request_to_model(model_instance, active_service, prompt, iteration_count=0, model_name_override=override_model)
+                    model_duration = time.time() - start_model_time
+                    timings['model'] += model_duration
+                    if not answer:
+                        print(f"{Colors.WARNING}{Symbols.WARNING}  ПРЕДУПРЕЖДЕНИЕ: Пустой ответ на батч {bi}. Пропускаю...{Colors.ENDC}", flush=True)
+                        continue
+                    _log_run(run_log_file_path, f"ОТВЕТ (Состояние: CONTEXT_PREP, Батч: {bi})", answer['text'])
+
+                    # Отчёт о стоимости для override-модели
+                    try:
+                        cost = calculate_cost(override_model, answer["input_tokens"], answer["output_tokens"])
+                        total_cost += cost
+                        cost_log.append({"phase": "CONTEXT_PREP", "iteration": bi, "cost": cost})
+                        print(f"{Colors.GREY}📊 CONTEXT_PREP[{bi}]: Вход: {answer['input_tokens']} т., Выход: {answer['output_tokens']} т. | Время: {model_duration:.2f} сек. | Стоимость: ~${cost:.6f}{' '*10}{Colors.ENDC}", flush=True)
+                    except Exception:
+                        pass
+
+                    # Парсинг блока ```files```
+                    blocks = parse_all_blocks(answer['text'])
+                    files_block = next((b for b in blocks if b['type'] == 'files'), None)
+                    if files_block and files_block['content']:
+                        for line in files_block['content'].splitlines():
+                            p = line.strip()
+                            if not p:
+                                continue
+                            if p.startswith('- '):
+                                p = p[2:].strip()
+                            # Нормализация к относительному безопасному виду для отображения (НЕ создаём пути тут)
+                            p = os.path.normpath(p)
+                            if not (p.startswith('/') or p.startswith('~') or p.startswith('..') or '\\' in p):
+                                aggregated_files.add(p)
+                    else:
+                        print(f"{Colors.GREY}{Symbols.INFO}  Батч {bi}: блок files не найден или пуст.{Colors.ENDC}", flush=True)
+
+                files_to_include_fully = sorted(aggregated_files)
+                if files_to_include_fully:
+                    print(f"{Colors.HEADER}Итоговый список файлов для ПОЛНОГО включения ({len(files_to_include_fully)}):{Colors.ENDC}\n{Colors.CYAN}" + "\n".join(files_to_include_fully) + Colors.ENDC, flush=True)
+                else:
+                    print(f"{Colors.WARNING}{Symbols.WARNING}  Жадный отбор не вернул файлов. Продолжаю без расширения контекста.{Colors.ENDC}", flush=True)
+
+                state = "PLANNING"
+                # CONTEXT_PREP — это отдельная фаза, не считаем её как итерацию разработки
+                continue
+            except Exception as e:
+                print(f"{Colors.WARNING}{Symbols.WARNING}  ПРЕДУПРЕЖДЕНИЕ: Ошибка стадии CONTEXT_PREP: {e}. Продолжаю к планированию...{Colors.ENDC}", flush=True)
+                state = "PLANNING"
+                continue
+
         # --- 1. GENERATE PROMPT BASED ON STATE ---
         current_prompt = None
         log_iter = iteration_count if state != "PLANNING" else 0
         
         if state == "PLANNING":
             print(f"\n{Colors.BOLD}{Colors.HEADER}--- ЭТАП: ПЛАНИРОВАНИЕ ---{Colors.ENDC}", flush=True)
-            project_context, duration = get_project_context(is_fast_mode=False, files_to_include_fully=None)
+            # На этапе планирования учитываем жадно отобранные файлы из CONTEXT_PREP (если есть)
+            project_context, duration = get_project_context(is_fast_mode=False, files_to_include_fully=files_to_include_fully)
             timings['context'] += duration
             if project_context:
                 current_prompt = sloth_core.get_clarification_and_planning_prompt(project_context, initial_task, boundary=BOUNDARY_TOKEN)
@@ -386,32 +453,26 @@ def main(is_fix_mode, is_fast_mode, history_file_path, run_log_file_path, plan_f
         # --- 3. PROCESS RESPONSE AND DETERMINE NEXT STATE ---
         # --- НОВЫЙ, НАДЕЖНЫЙ КОД ---
         if state == "PLANNING":
-            # Логика для планирования используется новый парсер для единообразия.
+            # Парсим блоки планирования: теперь ожидаем только clarification ИЛИ plan
             all_plan_blocks = parse_all_blocks(answer_text)
             clarification_block = next((b for b in all_plan_blocks if b['type'] == 'clarification'), None)
-            
+
             if clarification_block:
                 clarification = clarification_block['content']
                 print(f"{Colors.HEADER}{Colors.BOLD}🤖 Модель просит уточнений:{Colors.ENDC}\n{Colors.CYAN}{clarification}{Colors.ENDC}", flush=True)
                 user_response = _read_multiline_input("Пожалуйста, предоставьте ответ на вопросы модели. (Enter 3 раза для завершения)")
                 initial_task += f"\n\n--- УТОЧНЕНИЕ ОТ ПОЛЬЗОВАТЕЛЯ ---\n{user_response}"
-                state = "PLANNING" # Loop in planning state
+                state = "PLANNING"  # Остаёмся в планировании до получения плана
                 continue
 
             plan_block = next((b for b in all_plan_blocks if b['type'] == 'plan'), None)
-            files_block = next((b for b in all_plan_blocks if b['type'] == 'files'), None)
 
-            if plan_block and files_block:
+            if plan_block:
                 plan = plan_block['content']
-                files_list_str = files_block['content']
                 print(f"{Colors.OKGREEN}✅ Задача понятна. План получен.{Colors.ENDC}\n{Colors.HEADER}План действий:{Colors.ENDC}\n{Colors.CYAN}{plan}{Colors.ENDC}", flush=True)
-                with open(plan_file_path, "w", encoding='utf-8') as f: f.write(plan)
-                
-                raw_files_list = [line.strip() for line in files_list_str.split('\n') if line.strip() and not line.strip().startswith('- ')]
-                # Здесь _normalize_model_path больше не нужен, валидация будет на этапе записи
-                files_to_include_fully = raw_files_list
-
-                print(f"{Colors.HEADER}Запрошены полные версии файлов:{Colors.ENDC}\n{Colors.CYAN}" + "\n".join(files_to_include_fully) + Colors.ENDC, flush=True)
+                with open(plan_file_path, "w", encoding='utf-8') as f:
+                    f.write(plan)
+                # ВНИМАНИЕ: файлы для полного включения берём ИСКЛЮЧИТЕЛЬНО из CONTEXT_PREP
                 state = "INITIAL_CODING"
             else:
                 print(f"{Colors.WARNING}⚠️ Модель не вернула ни уточнений, ни плана. Пробуем снова...{Colors.ENDC}", flush=True)

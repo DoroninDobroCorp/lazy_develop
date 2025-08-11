@@ -69,6 +69,7 @@ GOOGLE_API_KEY = sloth_config.get("google.api_key", None)
 GOOGLE_CLOUD_PROJECT = sloth_config.get("google.cloud_project", None)
 GOOGLE_CLOUD_LOCATION = _pick_cfg("google.cloud_location", "GOOGLE_CLOUD_LOCATION", "us-central1")
 MODEL_NAME = _pick_cfg("model.name", "SLOTH_MODEL_NAME", "gemini-2.5-pro")
+CONTEXT_PREP_MODEL_NAME = _pick_cfg("model.context_prep_name", "SLOTH_CONTEXT_PREP_MODEL", "gemini-2.5-flash")
 API_TIMEOUT_SECONDS = int(_pick_cfg("api.timeout_seconds", "SLOTH_API_TIMEOUT", "600"))
 
 # ВАЖНО: максимальный бюджет размышлений.
@@ -281,7 +282,7 @@ def _extract_text_and_usage_from_genai_response(resp):
         pass
     return full_text, prompt_tokens, output_tokens
 
-def send_request_to_model(model_instance, active_service, prompt_text, iteration_count=0):
+def send_request_to_model(model_instance, active_service, prompt_text, iteration_count=0, model_name_override=None):
     """Возвращает словарь с текстом ответа и информацией о токенах."""
     global GOOGLE_AI_HAS_FAILED_THIS_SESSION, _last_request_log_key
 
@@ -294,6 +295,9 @@ def send_request_to_model(model_instance, active_service, prompt_text, iteration
             print(f"{Colors.CYAN}⏳ ЛОГ: Отправляю запрос... (таймаут: {API_TIMEOUT_SECONDS} сек){Colors.ENDC}")
             _last_request_log_key = log_key
 
+        # Выбор модели: либо override, либо основной MODEL_NAME
+        _model_to_use = model_name_override or MODEL_NAME
+
         if active_service == "Google GenAI SDK":
             # Новый клиент + thinking_config
             cfg = GenerateContentConfig(
@@ -303,8 +307,11 @@ def send_request_to_model(model_instance, active_service, prompt_text, iteration
                 # критично: не задаём max_output_tokens
                 thinking_config=ThinkingConfig(thinking_budget=THINKING_BUDGET_TOKENS),
             )
+            print(f"  model={_model_to_use}")
+            print(f"  top_k={GENERATION_TOP_K}")
+            print(f"  thinking_budget={THINKING_BUDGET_TOKENS}")
             response = model_instance.models.generate_content(
-                model=MODEL_NAME,
+                model=_model_to_use,
                 contents=prompt_text,
                 config=cfg,
             )
@@ -313,7 +320,7 @@ def send_request_to_model(model_instance, active_service, prompt_text, iteration
         elif active_service == "Google AI (Legacy SDK)":
             # Старый generativeai; thinking тут недоступен, max_output_tokens не задаем
             request_options = {"timeout": API_TIMEOUT_SECONDS}
-            response = model_instance.generate_content(prompt_text, request_options=request_options)
+            response = model_instance.generate_content(prompt_text, request_options={"timeout": API_TIMEOUT_SECONDS})
             # Склейка ответа
             text = getattr(response, "text", None)
             if not text:
@@ -426,7 +433,7 @@ def get_clarification_and_planning_prompt(context, task, boundary=None):
 1.  Анализируй задачу и **сокращённый** контекст проекта.
 2.  **Два пути**:
     *   Если задача **непонятна** — верни только ```clarification ... ```.
-    *   Если задача **понятна** — верни ```plan ... ``` и ```files ... ```.
+    *   Если задача **понятна** — верни только ```plan ... ```.
 3.  Запрещено генерировать ```bash``` или `write_file` на этапе планирования.
 """
 
@@ -589,4 +596,91 @@ def get_log_analysis_prompt(context, goal, history, logs, boundary=None):
 --- КОНЕЦ КОНТЕКСТА ---
 
 Исходная ЦЕЛЬ: {goal}
+"""
+
+def get_context_prep_prompt(context_chunk: str, goal: str, boundary: str | None = None) -> str:
+    """
+    Генерирует промпт для стадии "Подготовка контекста". Задача модели: НЕ решать цель,
+    а ЖАДНО собрать список файлов, которые могут понадобиться для решения или быть изменены.
+
+    Ожидаемый вывод:
+    ```files
+    path/to/file1
+    path/to/file2
+    ...
+    ```
+    Никаких других блоков, по возможности без лишнего текста.
+    """
+    rules = (
+        "Ты выполняешь только стадию подготовки контекста. НЕ решай задачу. "
+        "Твоя цель — жадно выбрать все потенциально релевантные файлы. "
+        "Если сомневаешься — включай файл. Дальнейшая работа будет на другой модели."
+    )
+    return f"""{rules}
+
+Исходная ЦЕЛЬ:
+{goal}
+
+--- КУСОК КОНТЕКСТА (файлы и содержимое) ---
+{context_chunk}
+--- КОНЕЦ КОНТЕКСТА ---
+
+Выведи только список путей в блоке ```files```. Пути должны быть относительными к корню проекта.
+"""
+
+planning_rules = f"""
+Ты — AI-планировщик. Первая задача — убедиться, что исходная задача понятна.
+
+**ПРАВИЛА ПЛАНИРОВАНИЯ:**
+
+1.  Анализируй задачу и **сокращённый** контекст проекта.
+2.  **Два пути**:
+    *   Если задача **непонятна** — верни только ```clarification ... ```.
+    *   Если задача **понятна** — верни ```plan ... ``` и ```files ... ```.
+3.  Запрещено генерировать ```bash``` или `write_file` на этапе планирования.
+"""
+
+global_rules = f"""
+        *   Для уточнений: ````clarification ... ````
+        *   Для ручных шагов: ````manual ... ````
+        *   Для описания своих действий: ````summary ... ```` или ````done_summary ... ````
+
+2.  **ПРАВИЛО ПУТЕЙ (САМОЕ ВАЖНОЕ!):**
+    *   Все пути к файлам, которые ты используешь (в блоках `files`, `write_file`, `bash`), ДОЛЖНЫ быть **относительными от корня проекта**.
+    *   **КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО** начинать путь с имени корневой папки проекта. Система автоматически работает из корня проекта.
+    *   **Пример:** Если проект находится в папке `/path/to/my-project`, и тебе нужен файл `src/app.js`:
+        *   **ПРАВИЛЬНО:** `src/app.js`
+        *   **НЕПРАВИЛЬНО:** `my-project/src/app.js`
+    *   Для блока `write_file` путь обязан указываться строго в атрибуте: `path="relative/path/to/file"`.
+    *   Запрещено: абсолютные пути (`/...`), `~`, последовательности `..`, обратные слэши `\`, пробелы в пути, подстановки/переменные.
+    *   Путь не должен начинаться с имени корневой папки проекта.
+    *   Разрешённые символы в пути: латиница/цифры/`_`/`-`/`.` и разделитель `/`.
+
+3.  **Рабочая Директория:** Все команды выполняются из **корня проекта**. **ЗАПРЕЩЕНО** использовать `cd`.
+
+4.  **Разрешенные Команды:** `{', '.join(ALLOWED_COMMANDS)}`. Команды, не входящие в этот список, должны быть помещены в блок ```manual```.
+
+5.  **Фокус и Прагматизм:** Твоя главная цель — решить **исходную задачу** пользователя. Не занимайся перфекционизмом: не исправляй стиль кода и не делай рефакторинг, не связанный с задачей.
+
+6.  **ПРАВИЛО ЛОГИРОВАНИЯ (КРИТИЧЕСКИ ВАЖНО):**
+     *   Ты можешь и должен добавлять логи (`print`, `console.log` и т.п.) для отладки.
+     *   **ЗАПРЕЩЕНО** добавлять ЛЮБОЙ отладочный вывод без точного префикса `[SLOTHLOG]`. Каждый новый лог, который ты пишешь, **ОБЯЗАН** начинаться с `[SLOTHLOG]`.
+     *   **Пример ПРАВИЛЬНО:** `print(f"[SLOTHLOG] Variable foo: {{foo}}")`
+     *   **Пример НЕПРАВИЛЬНО:** `print(f"Variable foo: {{foo}}")`
+     *   Это правило абсолютно, исключений нет.
+"""
+
+def get_initial_planning_prompt(context, task, boundary=None):
+    return f"""{planning_rules}
+{global_rules}
+
+--- КОНТЕКСТ ПРОЕКТА (СОКРАЩЕННЫЙ) ---
+{context}
+--- КОНЕЦ КОНТЕКСТА ---
+
+--- ЗАДАЧА ПОЛЬЗОВАТЕЛЯ ---
+{task}
+--- КОНЕЦ ЗАДАЧИ ---
+
+Проанализируй задачу и контекст. Следуй правилам этапа планирования.
 """
