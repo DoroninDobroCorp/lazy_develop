@@ -6,6 +6,7 @@ import re
 import json
 import platform
 import subprocess
+import signal
 import argparse
 # --- ИЗМЕНЕННЫЙ БЛОК ИМПОРТА TKINTER ---
 try:
@@ -30,6 +31,105 @@ PLAN_FILE_NAME = 'sloth_plan.txt'
 # Базовая стартовая папка выбора проекта (уменьшает количество кликов)
 # Может быть переопределена в конфиге: paths.default_start_dir
 DEFAULT_START_DIR = '/Users/vladimirdoronin/VovkaNowEngineer'
+
+def _execute_verify_with_timeout(command: str, timeout_seconds: int):
+    """
+    Запускает verify-команду с жёстким таймаутом. Создаёт отдельную группу процессов,
+    по истечении таймаута эскалирует завершение: SIGINT -> SIGTERM -> SIGKILL по всей группе.
+    Возвращает (return_code, stdout, stderr). При таймауте код возврата = 124.
+    """
+    try:
+        # Создаём новую группу процессов, чтобы потом убить всех детей разом
+        proc = subprocess.Popen(
+            command,
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding='utf-8',
+            preexec_fn=os.setsid,
+        )
+    except Exception as e:
+        return -1, "", f"Ошибка запуска verify_command: {e}"
+
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout_seconds)
+        rc = proc.returncode
+        return rc, stdout, stderr
+    except subprocess.TimeoutExpired:
+        # Эскалация завершения группы процессов
+        try:
+            pgid = os.getpgid(proc.pid)
+        except Exception:
+            pgid = None
+
+        def _kill_group(sig):
+            if pgid is not None:
+                try:
+                    os.killpg(pgid, sig)
+                except Exception:
+                    pass
+            else:
+                try:
+                    proc.send_signal(sig)
+                except Exception:
+                    pass
+
+        # Мягко прерываем
+        _kill_group(signal.SIGINT)
+        try:
+            stdout, stderr = proc.communicate(timeout=2)
+        except subprocess.TimeoutExpired:
+            # Жёстче
+            _kill_group(signal.SIGTERM)
+            try:
+                stdout, stderr = proc.communicate(timeout=2)
+            except subprocess.TimeoutExpired:
+                # Убить насильно
+                _kill_group(signal.SIGKILL)
+                stdout, stderr = proc.communicate()
+        return 124, stdout or "", stderr or ""
+
+def _scan_project_for_token(root_dir: str, token: str = "SLOTH_BOUNDARY", max_per_file: int = 3, max_files: int = 50):
+    """Ищет служебный маркер в текстовых файлах проекта. Возвращает список строк с местами попаданий.
+    По умолчанию ограничивает количество совпадений.
+    """
+    findings = []
+    try:
+        for dirpath, dirnames, filenames in os.walk(root_dir):
+            # пропускаем скрытые папки и node_modules/.git/.venv/venv/.idea
+            base = os.path.basename(dirpath)
+            if base in {".git", "node_modules", ".venv", "venv", ".idea", ".vscode", "dist", "build"}:
+                continue
+            for fn in filenames:
+                # пропустим бинарные/крупные/очевидные артефакты
+                lower = fn.lower()
+                if any(lower.endswith(ext) for ext in [".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".pdf", ".zip", ".tar", ".gz", ".woff", ".woff2", ".ttf", ".eot", ".mp4", ".mov", ".mp3", ".bin"]):
+                    continue
+                fpath = os.path.join(dirpath, fn)
+                # ограничим размер файла
+                try:
+                    if os.path.getsize(fpath) > 2 * 1024 * 1024:
+                        continue
+                except Exception:
+                    continue
+                try:
+                    with open(fpath, "r", encoding="utf-8", errors="ignore") as f:
+                        per_file = 0
+                        for i, line in enumerate(f, start=1):
+                            if token in line:
+                                rel = os.path.relpath(fpath, root_dir)
+                                findings.append(f"{rel}:{i}: {line.strip()}")
+                                per_file += 1
+                                if per_file >= max_per_file:
+                                    break
+                    if len(findings) >= max_files:
+                        break
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    return findings
 
 def _parse_and_validate_filepath(header_line: str, project_root_dir: str) -> str:
     """
@@ -555,16 +655,19 @@ def main(is_fix_mode, is_fast_mode, history_file_path, run_log_file_path, plan_f
             if repeat_same_files_count >= 2 and iteration_changed_files:
                 print(f"{Colors.WARNING}{Symbols.WARNING}  Обнаружен повтор правок одних и тех же файлов (>=3 подряд). Форсирую верификацию и анализ логов.{Colors.ENDC}", flush=True)
                 if verify_command is not None:
+                    # Быстрый скан на служебные маркеры перед запуском verify
+                    findings = _scan_project_for_token(os.getcwd(), "SLOTH_BOUNDARY")
+                    if findings:
+                        msg = "Обнаружены служебные маркеры SLOTH_BOUNDARY в коде. Требуется чистка.\n" + "\n".join(findings[:20])
+                        _log_run(run_log_file_path, "SLOTH_BOUNDARY FINDINGS (FORCED)", msg)
+                        failed_command, error_message = "boundary scan (forced)", msg
+                        state = "FIXING_ERROR"
+                        attempt_history.append(history_entry + f"**Результат:** ПРОВАЛ\n**Ошибка:** {error_message}")
+                        iteration_count += 1
+                        continue
                     print(f"{Colors.OKBLUE}🧪 (FORCED) Запускаю верификацию: {verify_command}{Colors.ENDC}", flush=True)
                     start_verify_time = time.time()
-                    try:
-                        proc = subprocess.Popen(verify_command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8')
-                        stdout, stderr = proc.communicate(timeout=verify_timeout_seconds)
-                        rc = proc.returncode
-                    except subprocess.TimeoutExpired:
-                        proc.kill(); stdout, stderr = proc.communicate(); rc = 124
-                    except Exception as e:
-                        stdout, stderr, rc = "", f"Ошибка запуска verify_command: {e}", -1
+                    rc, stdout, stderr = _execute_verify_with_timeout(verify_command, verify_timeout_seconds)
                     timings['verify'] += time.time() - start_verify_time
                     def _trim(s, lim=log_trim_limit): return (s[:lim] + "\n...[TRIMMED]...") if len(s) > lim else s
                     logs_collected = f"$ {verify_command}\n(exit={rc})\n\n[STDOUT]\n{_trim(stdout)}\n\n[STDERR]\n{_trim(stderr)}"
@@ -593,16 +696,19 @@ def main(is_fix_mode, is_fast_mode, history_file_path, run_log_file_path, plan_f
             elif success:
                 history_entry += "**Результат:** УСПЕХ"
                 if verify_run_present and verify_command is not None:
+                    # Быстрый скан на служебные маркеры перед запуском verify
+                    findings = _scan_project_for_token(os.getcwd(), "SLOTH_BOUNDARY")
+                    if findings:
+                        msg = "Обнаружены служебные маркеры SLOTH_BOUNDARY в коде. Требуется чистка.\n" + "\n".join(findings[:20])
+                        _log_run(run_log_file_path, "SLOTH_BOUNDARY FINDINGS", msg)
+                        failed_command, error_message = "boundary scan", msg
+                        state = "FIXING_ERROR"
+                        attempt_history.append(history_entry + f"**Результат:** ПРОВАЛ\n**Ошибка:** {error_message}")
+                        iteration_count += 1
+                        continue
                     print(f"{Colors.OKBLUE}🧪 Запускаю верификацию: {verify_command}{Colors.ENDC}", flush=True)
                     start_verify_time = time.time()
-                    try:
-                        proc = subprocess.Popen(verify_command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8')
-                        stdout, stderr = proc.communicate(timeout=verify_timeout_seconds)
-                        rc = proc.returncode
-                    except subprocess.TimeoutExpired:
-                        proc.kill(); stdout, stderr = proc.communicate(); rc = 124
-                    except Exception as e:
-                        stdout, stderr, rc = "", f"Ошибка запуска verify_command: {e}", -1
+                    rc, stdout, stderr = _execute_verify_with_timeout(verify_command, verify_timeout_seconds)
                     timings['verify'] += time.time() - start_verify_time
                     def _trim(s, lim=log_trim_limit): return (s[:lim] + "\n...[TRIMMED]...") if len(s) > lim else s
                     logs_collected = f"$ {verify_command}\n(exit={rc})\n\n[STDOUT]\n{_trim(stdout)}\n\n[STDERR]\n{_trim(stderr)}"
